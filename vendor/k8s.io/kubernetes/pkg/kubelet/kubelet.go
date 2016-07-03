@@ -71,7 +71,6 @@ import (
 	"k8s.io/kubernetes/pkg/kubelet/util/format"
 	"k8s.io/kubernetes/pkg/kubelet/util/ioutils"
 	"k8s.io/kubernetes/pkg/kubelet/util/queue"
-	kubeletvolume "k8s.io/kubernetes/pkg/kubelet/volume"
 	"k8s.io/kubernetes/pkg/runtime"
 	"k8s.io/kubernetes/pkg/securitycontext"
 	"k8s.io/kubernetes/pkg/types"
@@ -93,7 +92,7 @@ import (
 	"k8s.io/kubernetes/pkg/util/wait"
 	"k8s.io/kubernetes/pkg/version"
 	"k8s.io/kubernetes/pkg/volume"
-	"k8s.io/kubernetes/pkg/volume/util/volumehelper"
+	attachdetachutil "k8s.io/kubernetes/pkg/volume/util/attachdetach"
 	"k8s.io/kubernetes/pkg/watch"
 	"k8s.io/kubernetes/plugin/pkg/scheduler/algorithm/predicates"
 	"k8s.io/kubernetes/plugin/pkg/scheduler/schedulercache"
@@ -152,6 +151,9 @@ const (
 	// Period for performing image garbage collection.
 	ImageGCPeriod = 5 * time.Minute
 
+	// Maximum period to wait for pod volume setup operations
+	maxWaitForVolumeOps = 20 * time.Minute
+
 	// maxImagesInStatus is the number of max images we store in image status.
 	maxImagesInNodeStatus = 50
 )
@@ -201,13 +203,11 @@ func NewMainKubelet(
 	imageGCPolicy ImageGCPolicy,
 	diskSpacePolicy DiskSpacePolicy,
 	cloud cloudprovider.Interface,
-	autoDetectCloudProvider bool,
 	nodeLabels map[string]string,
 	nodeStatusUpdateFrequency time.Duration,
 	osInterface kubecontainer.OSInterface,
 	cgroupRoot string,
 	containerRuntime string,
-	runtimeRequestTimeout time.Duration,
 	rktPath string,
 	rktAPIEndpoint string,
 	rktStage1Image string,
@@ -299,6 +299,8 @@ func NewMainKubelet(
 	}
 	containerRefManager := kubecontainer.NewRefManager()
 
+	volumeManager := newVolumeManager()
+
 	oomWatcher := NewOOMWatcher(cadvisorInterface, recorder)
 
 	// TODO: remove when internal cbr0 implementation gets removed in favor
@@ -331,11 +333,11 @@ func NewMainKubelet(
 		recorder:                       recorder,
 		cadvisor:                       cadvisorInterface,
 		diskSpaceManager:               diskSpaceManager,
+		volumeManager:                  volumeManager,
 		cloud:                          cloud,
-		autoDetectCloudProvider:   autoDetectCloudProvider,
-		nodeRef:                   nodeRef,
-		nodeLabels:                nodeLabels,
-		nodeStatusUpdateFrequency: nodeStatusUpdateFrequency,
+		nodeRef:                        nodeRef,
+		nodeLabels:                     nodeLabels,
+		nodeStatusUpdateFrequency:      nodeStatusUpdateFrequency,
 		os:                         osInterface,
 		oomWatcher:                 oomWatcher,
 		cgroupRoot:                 cgroupRoot,
@@ -454,7 +456,6 @@ func NewMainKubelet(
 			kubecontainer.RealOS{},
 			imageBackOff,
 			serializeImagePulls,
-			runtimeRequestTimeout,
 		)
 		if err != nil {
 			return nil, err
@@ -495,19 +496,9 @@ func NewMainKubelet(
 		containerRefManager,
 		recorder)
 
-	klet.volumePluginMgr, err =
-		NewInitializedVolumePluginMgr(klet, volumePlugins)
-	if err != nil {
+	if err := klet.volumePluginMgr.InitPlugins(volumePlugins, &volumeHost{klet}); err != nil {
 		return nil, err
 	}
-
-	klet.volumeManager, err = kubeletvolume.NewVolumeManager(
-		enableControllerAttachDetach,
-		hostname,
-		klet.podManager,
-		klet.kubeClient,
-		klet.volumePluginMgr,
-		klet.containerRuntime)
 
 	runtimeCache, err := kubecontainer.NewRuntimeCache(klet.containerRuntime)
 	if err != nil {
@@ -652,7 +643,7 @@ type Kubelet struct {
 	runtimeState *runtimeState
 
 	// Volume plugins.
-	volumePluginMgr *volume.VolumePluginMgr
+	volumePluginMgr volume.VolumePluginMgr
 
 	// Network plugin.
 	networkPlugin network.NetworkPlugin
@@ -684,14 +675,11 @@ type Kubelet struct {
 	// Syncs pods statuses with apiserver; also used as a cache of statuses.
 	statusManager status.Manager
 
-	// VolumeManager runs a set of asynchronous loops that figure out which
-	// volumes need to be attached/mounted/unmounted/detached based on the pods
-	// scheduled on this node and makes it so.
-	volumeManager kubeletvolume.VolumeManager
+	// Manager for the volume maps for the pods.
+	volumeManager *volumeManager
 
-	// Cloud provider interface.
-	cloud                   cloudprovider.Interface
-	autoDetectCloudProvider bool
+	//Cloud provider interface
+	cloud cloudprovider.Interface
 
 	// Reference to this node.
 	nodeRef *api.ObjectReference
@@ -923,7 +911,7 @@ func (kl *Kubelet) listPodsFromDisk() ([]types.UID, error) {
 // Starts garbage collection threads.
 func (kl *Kubelet) StartGarbageCollection() {
 	go wait.Until(func() {
-		if err := kl.containerGC.GarbageCollect(kl.sourcesReady.AllReady()); err != nil {
+		if err := kl.containerGC.GarbageCollect(); err != nil {
 			glog.Errorf("Container garbage collection failed: %v", err)
 		}
 	}, ContainerGCPeriod, wait.NeverStop)
@@ -995,9 +983,6 @@ func (kl *Kubelet) Run(updates <-chan kubetypes.PodUpdate) {
 		kl.runtimeState.setInitError(err)
 	}
 
-	// Start volume manager
-	go kl.volumeManager.Run(wait.NeverStop)
-
 	if kl.kubeClient != nil {
 		// Start syncing node status immediately, this may set up things the runtime needs to run.
 		go wait.Until(kl.syncNodeStatus, kl.nodeStatusUpdateFrequency, wait.NeverStop)
@@ -1058,7 +1043,7 @@ func (kl *Kubelet) initialNodeStatus() (*api.Node, error) {
 			node.Annotations = make(map[string]string)
 		}
 
-		node.Annotations[volumehelper.ControllerManagedAttachAnnotation] = "true"
+		node.Annotations[attachdetachutil.ControllerManagedAnnotation] = "true"
 	}
 
 	// @question: should this be place after the call to the cloud provider? which also applies labels
@@ -1118,27 +1103,20 @@ func (kl *Kubelet) initialNodeStatus() (*api.Node, error) {
 		}
 	} else {
 		node.Spec.ExternalID = kl.hostname
-		if kl.autoDetectCloudProvider {
-			// If no cloud provider is defined - use the one detected by cadvisor
-			info, err := kl.GetCachedMachineInfo()
-			if err == nil {
-				kl.updateCloudProviderFromMachineInfo(node, info)
-			}
+		// If no cloud provider is defined - use the one detected by cadvisor
+		info, err := kl.GetCachedMachineInfo()
+		if err == nil {
+			kl.updateCloudProviderFromMachineInfo(node, info)
 		}
 	}
 	if err := kl.setNodeStatus(node); err != nil {
 		return nil, err
 	}
-
 	return node, nil
 }
 
 func (kl *Kubelet) providerRequiresNetworkingConfiguration() bool {
-	// TODO: We should have a mechanism to say whether native cloud provider
-	// is used or whether we are using overlay networking. We should return
-	// true for cloud providers if they implement Routes() interface and
-	// we are not using overlay networking.
-	if kl.cloud == nil || kl.cloud.ProviderName() != "gce" || kl.flannelExperimentalOverlay {
+	if kl.cloud == nil || kl.flannelExperimentalOverlay {
 		return false
 	}
 	_, supported := kl.cloud.Routes()
@@ -1165,7 +1143,6 @@ func (kl *Kubelet) registerWithApiserver() {
 			glog.Errorf("Unable to construct api.Node object for kubelet: %v", err)
 			continue
 		}
-
 		glog.V(2).Infof("Attempting to register node %s", node.Name)
 		if _, err := kl.kubeClient.Core().Nodes().Create(node); err != nil {
 			if !apierrors.IsAlreadyExists(err) {
@@ -1428,21 +1405,23 @@ func (kl *Kubelet) GenerateRunContainerOptions(pod *api.Pod, container *api.Cont
 		return nil, err
 	}
 	opts.Hostname = hostname
-	podName := volumehelper.GetUniquePodName(pod)
-	volumes := kl.volumeManager.GetMountedVolumesForPod(podName)
+	vol, ok := kl.volumeManager.GetVolumes(pod.UID)
+	if !ok {
+		return nil, fmt.Errorf("impossible: cannot find the mounted volumes for pod %q", format.Pod(pod))
+	}
 
 	opts.PortMappings = makePortMappings(container)
 	// Docker does not relabel volumes if the container is running
 	// in the host pid or ipc namespaces so the kubelet must
 	// relabel the volumes
 	if pod.Spec.SecurityContext != nil && (pod.Spec.SecurityContext.HostIPC || pod.Spec.SecurityContext.HostPID) {
-		err = kl.relabelVolumes(pod, volumes)
+		err = kl.relabelVolumes(pod, vol)
 		if err != nil {
 			return nil, err
 		}
 	}
 
-	opts.Mounts, err = makeMounts(pod, kl.getPodDir(pod.UID), container, hostname, hostDomainName, podIP, volumes)
+	opts.Mounts, err = makeMounts(pod, kl.getPodDir(pod.UID), container, hostname, hostDomainName, podIP, vol)
 	if err != nil {
 		return nil, err
 	}
@@ -1575,11 +1554,7 @@ func (kl *Kubelet) makeEnvironmentVariables(pod *api.Pod, container *api.Contain
 					return result, err
 				}
 			case envVar.ValueFrom.ResourceFieldRef != nil:
-				defaultedPod, defaultedContainer, err := kl.defaultPodLimitsForDownwardApi(pod, container)
-				if err != nil {
-					return result, err
-				}
-				runtimeVal, err = containerResourceRuntimeValue(envVar.ValueFrom.ResourceFieldRef, defaultedPod, defaultedContainer)
+				runtimeVal, err = containerResourceRuntimeValue(envVar.ValueFrom.ResourceFieldRef, pod, container)
 				if err != nil {
 					return result, err
 				}
@@ -1811,7 +1786,7 @@ func (kl *Kubelet) makePodDataDirs(pod *api.Pod) error {
 // * Create a mirror pod if the pod is a static pod, and does not
 //   already have a mirror pod
 // * Create the data directories for the pod if they do not exist
-// * Wait for volumes to attach/mount
+// * Mount volumes and update the volume manager
 // * Fetch the pull secrets for the pod
 // * Call the container runtime's SyncPod callback
 // * Update the traffic shaping for the pod's ingress and egress limits
@@ -1918,12 +1893,9 @@ func (kl *Kubelet) syncPod(o syncPodOptions) error {
 		return err
 	}
 
-	// Wait for volumes to attach/mount
-	defaultedPod, _, err := kl.defaultPodLimitsForDownwardApi(pod, nil)
+	// Mount volumes and update the volume manager
+	podVolumes, err := kl.mountExternalVolumes(pod)
 	if err != nil {
-		return err
-	}
-	if err := kl.volumeManager.WaitForAttachAndMount(defaultedPod); err != nil {
 		ref, errGetRef := api.GetReference(pod)
 		if errGetRef == nil && ref != nil {
 			kl.recorder.Eventf(ref, api.EventTypeWarning, kubecontainer.FailedMountVolume, "Unable to mount volumes for pod %q: %v", format.Pod(pod), err)
@@ -1931,6 +1903,7 @@ func (kl *Kubelet) syncPod(o syncPodOptions) error {
 			return err
 		}
 	}
+	kl.volumeManager.SetVolumes(pod.UID, podVolumes)
 
 	// Fetch the pull secrets for the pod
 	pullSecrets, err := kl.getPullSecretsForPod(pod)
@@ -1994,16 +1967,56 @@ func (kl *Kubelet) getPullSecretsForPod(pod *api.Pod) ([]api.Secret, error) {
 	return pullSecrets, nil
 }
 
+// resolveVolumeName returns the name of the persistent volume (PV) claimed by
+// a persistent volume claim (PVC) or an error if the claim is not bound.
+// Returns nil if the volume does not use a PVC.
+func (kl *Kubelet) resolveVolumeName(pod *api.Pod, volume *api.Volume) (string, error) {
+	claimSource := volume.VolumeSource.PersistentVolumeClaim
+	if claimSource != nil {
+		// resolve real volume behind the claim
+		claim, err := kl.kubeClient.Core().PersistentVolumeClaims(pod.Namespace).Get(claimSource.ClaimName)
+		if err != nil {
+			return "", fmt.Errorf("Cannot find claim %s/%s for volume %s", pod.Namespace, claimSource.ClaimName, volume.Name)
+		}
+		if claim.Status.Phase != api.ClaimBound {
+			return "", fmt.Errorf("Claim for volume %s/%s is not bound yet", pod.Namespace, claimSource.ClaimName)
+		}
+		// Use the real bound volume instead of PersistentVolume.Name
+		return claim.Spec.VolumeName, nil
+	}
+	return volume.Name, nil
+}
+
+// Stores all volumes defined by the set of pods into a map.
+// It stores real volumes there, i.e. persistent volume claims are resolved
+// to volumes that are bound to them.
+// Keys for each entry are in the format (POD_ID)/(VOLUME_NAME)
+func (kl *Kubelet) getDesiredVolumes(pods []*api.Pod) map[string]api.Volume {
+	desiredVolumes := make(map[string]api.Volume)
+	for _, pod := range pods {
+		for _, volume := range pod.Spec.Volumes {
+			volumeName, err := kl.resolveVolumeName(pod, &volume)
+			if err != nil {
+				glog.V(3).Infof("%v", err)
+				// Ignore the error and hope it's resolved next time
+				continue
+			}
+			identifier := path.Join(string(pod.UID), volumeName)
+			desiredVolumes[identifier] = volume
+		}
+	}
+	return desiredVolumes
+}
+
 // cleanupOrphanedPodDirs removes the volumes of pods that should not be
 // running and that have no containers running.
-func (kl *Kubelet) cleanupOrphanedPodDirs(
-	pods []*api.Pod, runningPods []*kubecontainer.Pod) error {
-	allPods := sets.NewString()
+func (kl *Kubelet) cleanupOrphanedPodDirs(pods []*api.Pod, runningPods []*kubecontainer.Pod) error {
+	active := sets.NewString()
 	for _, pod := range pods {
-		allPods.Insert(string(pod.UID))
+		active.Insert(string(pod.UID))
 	}
 	for _, pod := range runningPods {
-		allPods.Insert(string(pod.ID))
+		active.Insert(string(pod.ID))
 	}
 
 	found, err := kl.listPodsFromDisk()
@@ -2012,19 +2025,16 @@ func (kl *Kubelet) cleanupOrphanedPodDirs(
 	}
 	errlist := []error{}
 	for _, uid := range found {
-		if allPods.Has(string(uid)) {
+		if active.Has(string(uid)) {
 			continue
 		}
-		if podVolumesExist := kl.podVolumesExist(uid); podVolumesExist {
-			// If volumes have not been unmounted/detached, do not delete directory.
-			// Doing so may result in corruption of data.
-			glog.V(3).Infof("Orphaned pod %q found, but volumes are not cleaned up; err: %v", uid, err)
+		if volumes, err := kl.getPodVolumes(uid); err != nil || len(volumes) != 0 {
+			glog.V(3).Infof("Orphaned pod %q found, but volumes are not cleaned up; err: %v, volumes: %v ", uid, err, volumes)
 			continue
 		}
 
 		glog.V(3).Infof("Orphaned pod %q found, removing", uid)
 		if err := os.RemoveAll(kl.getPodDir(uid)); err != nil {
-			glog.Infof("Failed to remove orphaned pod %q dir; err: %v", uid, err)
 			errlist = append(errlist, err)
 		}
 	}
@@ -2070,6 +2080,88 @@ func (kl *Kubelet) cleanupBandwidthLimits(allPods []*api.Pod) error {
 			glog.V(2).Infof("Removing CIDR: %s (%v)", cidr, possibleCIDRs)
 			if err := kl.shaper.Reset(cidr); err != nil {
 				return err
+			}
+		}
+	}
+	return nil
+}
+
+// Compares the map of current volumes to the map of desired volumes.
+// If an active volume does not have a respective desired volume, clean it up.
+// This method is blocking:
+// 1) it talks to API server to find volumes bound to persistent volume claims
+// 2) it talks to cloud to detach volumes
+func (kl *Kubelet) cleanupOrphanedVolumes(pods []*api.Pod, runningPods []*kubecontainer.Pod) error {
+	desiredVolumes := kl.getDesiredVolumes(pods)
+	currentVolumes := kl.getPodVolumesFromDisk()
+
+	runningSet := sets.String{}
+	for _, pod := range runningPods {
+		runningSet.Insert(string(pod.ID))
+	}
+
+	for name, cleaner := range currentVolumes {
+		if _, ok := desiredVolumes[name]; !ok {
+			parts := strings.Split(name, "/")
+			if runningSet.Has(parts[0]) {
+				glog.Infof("volume %q, still has a container running (%q), skipping teardown", name, parts[0])
+				continue
+			}
+			//TODO (jonesdl) We should somehow differentiate between volumes that are supposed
+			//to be deleted and volumes that are leftover after a crash.
+			glog.V(3).Infof("Orphaned volume %q found, tearing down volume", name)
+			// TODO(yifan): Refactor this hacky string manipulation.
+			kl.volumeManager.DeleteVolumes(types.UID(parts[0]))
+			// Get path reference count
+			volumePath := cleaner.Unmounter.GetPath()
+			refs, err := mount.GetMountRefs(kl.mounter, volumePath)
+			if err != nil {
+				glog.Errorf("Could not get mount path references for %q: %v", volumePath, err)
+			}
+			//TODO (jonesdl) This should not block other kubelet synchronization procedures
+			err = cleaner.Unmounter.TearDown()
+			if err != nil {
+				glog.Errorf("Could not tear down volume %q at %q: %v", name, volumePath, err)
+			}
+
+			// volume is unmounted.  some volumes also require detachment from the node.
+			if cleaner.Detacher != nil && len(refs) == 1 {
+				// There is a bug in this code, where len(refs) is zero in some
+				// cases, and so RemoveVolumeInUse sometimes never gets called.
+				// The Attach/Detach Refactor should fix this, in the mean time,
+				// the controller timeout for safe mount is set to 3 minutes, so
+				// it will still detach the volume.
+				detacher := *cleaner.Detacher
+				devicePath, _, err := mount.GetDeviceNameFromMount(kl.mounter, refs[0])
+				if err != nil {
+					glog.Errorf("Could not find device path %v", err)
+				}
+
+				if err = detacher.UnmountDevice(refs[0], kl.mounter); err != nil {
+					glog.Errorf("Could not unmount the global mount for %q: %v", name, err)
+				}
+
+				pdName := path.Base(refs[0])
+				if kl.enableControllerAttachDetach {
+					// Attach/Detach controller is enabled and this volume type
+					// implments a detacher
+					uniqueDeviceName := attachdetachutil.GetUniqueDeviceName(
+						cleaner.PluginName, pdName)
+					kl.volumeManager.RemoveVolumeInUse(
+						api.UniqueDeviceName(uniqueDeviceName))
+				} else {
+					// Attach/Detach controller is disabled
+					err = detacher.Detach(pdName, kl.hostname)
+					if err != nil {
+						glog.Errorf("Could not detach volume %q at %q: %v", name, volumePath, err)
+					}
+				}
+
+				go func() {
+					if err = detacher.WaitForDetach(devicePath, maxWaitForVolumeOps); err != nil {
+						glog.Errorf("Error while waiting for detach: %v", err)
+					}
+				}()
 			}
 		}
 	}
@@ -2268,6 +2360,16 @@ func (kl *Kubelet) HandlePodCleanups() error {
 	// Note that we pass all pods (including terminated pods) to the function,
 	// so that we don't remove volumes associated with terminated but not yet
 	// deleted pods.
+	err = kl.cleanupOrphanedVolumes(allPods, runningPods)
+	if err != nil {
+		glog.Errorf("Failed cleaning up orphaned volumes: %v", err)
+		return err
+	}
+
+	// Remove any orphaned pod directories.
+	// Note that we pass all pods (including terminated pods) to the function,
+	// so that we don't remove directories associated with terminated but not yet
+	// deleted pods.
 	err = kl.cleanupOrphanedPodDirs(allPods, runningPods)
 	if err != nil {
 		glog.Errorf("Failed cleaning up orphaned pod directories: %v", err)
@@ -2357,23 +2459,21 @@ func hasHostPortConflicts(pods []*api.Pod) bool {
 
 // handleOutOfDisk detects if pods can't fit due to lack of disk space.
 func (kl *Kubelet) isOutOfDisk() bool {
+	outOfDockerDisk := false
+	outOfRootDisk := false
 	// Check disk space once globally and reject or accept all new pods.
 	withinBounds, err := kl.diskSpaceManager.IsRuntimeDiskSpaceAvailable()
 	// Assume enough space in case of errors.
-	if err != nil {
-		glog.Errorf("Failed to check if disk space is available for the runtime: %v", err)
-	} else if !withinBounds {
-		return true
+	if err == nil && !withinBounds {
+		outOfDockerDisk = true
 	}
 
 	withinBounds, err = kl.diskSpaceManager.IsRootDiskSpaceAvailable()
 	// Assume enough space in case of errors.
-	if err != nil {
-		glog.Errorf("Failed to check if disk space is available on the root partition: %v", err)
-	} else if !withinBounds {
-		return true
+	if err == nil && !withinBounds {
+		outOfRootDisk = true
 	}
-	return false
+	return outOfDockerDisk || outOfRootDisk
 }
 
 // matchesNodeSelector returns true if pod matches node's labels.
@@ -2538,7 +2638,7 @@ func (kl *Kubelet) syncLoopIteration(configCh <-chan kubetypes.PodUpdate, handle
 			// once we have checkpointing.
 			handler.HandlePodAdditions(u.Pods)
 		case kubetypes.UPDATE:
-			glog.V(2).Infof("SyncLoop (UPDATE, %q): %q", u.Source, format.PodsWithDeletiontimestamps(u.Pods))
+			glog.V(2).Infof("SyncLoop (UPDATE, %q): %q", u.Source, format.Pods(u.Pods))
 			handler.HandlePodUpdates(u.Pods)
 		case kubetypes.REMOVE:
 			glog.V(2).Infof("SyncLoop (REMOVE, %q): %q", u.Source, format.Pods(u.Pods))
@@ -2745,10 +2845,6 @@ func (kl *Kubelet) validateContainerLogStatus(podName string, podStatus *api.Pod
 	var cID string
 
 	cStatus, found := api.GetContainerStatus(podStatus.ContainerStatuses, containerName)
-	// if not found, check the init containers
-	if !found {
-		cStatus, found = api.GetContainerStatus(podStatus.InitContainerStatuses, containerName)
-	}
 	if !found {
 		return kubecontainer.ContainerID{}, fmt.Errorf("container %q in pod %q is not available", containerName, podName)
 	}
@@ -3410,11 +3506,7 @@ func (kl *Kubelet) tryUpdateNodeStatus() error {
 		return err
 	}
 	// Update the current status on the API server
-	updatedNode, err := kl.kubeClient.Core().Nodes().UpdateStatus(node)
-	if err == nil {
-		kl.volumeManager.MarkVolumesAsReportedInUse(
-			updatedNode.Status.VolumesInUse)
-	}
+	_, err = kl.kubeClient.Core().Nodes().UpdateStatus(node)
 	return err
 }
 

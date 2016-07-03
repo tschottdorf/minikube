@@ -79,9 +79,7 @@ func (c *Config) buildGlobalOptions() []string {
 // that the fields in the provided config will override the
 // result that get from the rkt api service.
 func (r *Runtime) getConfig(cfg *Config) (*Config, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), r.requestTimeout)
-	defer cancel()
-	resp, err := r.apisvc.GetInfo(ctx, &rktapi.GetInfoRequest{})
+	resp, err := r.apisvc.GetInfo(context.Background(), &rktapi.GetInfoRequest{})
 	if err != nil {
 		return nil, err
 	}

@@ -165,8 +165,8 @@ func (s *Serializer) Decode(originalData []byte, gvk *unversioned.GroupVersionKi
 	return unmarshalToObject(s.typer, s.creater, &actual, into, unk.Raw)
 }
 
-// Encode serializes the provided object to the given writer.
-func (s *Serializer) Encode(obj runtime.Object, w io.Writer) error {
+// EncodeToStream serializes the provided object to the given writer. Overrides is ignored.
+func (s *Serializer) EncodeToStream(obj runtime.Object, w io.Writer, overrides ...unversioned.GroupVersion) error {
 	var unk runtime.Unknown
 	kind := obj.GetObjectKind().GroupVersionKind()
 	unk = runtime.Unknown{
@@ -388,8 +388,8 @@ func unmarshalToObject(typer runtime.ObjectTyper, creater runtime.ObjectCreater,
 	return obj, actual, nil
 }
 
-// Encode serializes the provided object to the given writer. Overrides is ignored.
-func (s *RawSerializer) Encode(obj runtime.Object, w io.Writer) error {
+// EncodeToStream serializes the provided object to the given writer. Overrides is ignored.
+func (s *RawSerializer) EncodeToStream(obj runtime.Object, w io.Writer, overrides ...unversioned.GroupVersion) error {
 	switch t := obj.(type) {
 	case bufferedMarshaller:
 		// this path performs a single allocation during write but requires the caller to implement

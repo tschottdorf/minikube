@@ -18,7 +18,6 @@ package persistentvolume
 
 import (
 	"fmt"
-	"net"
 
 	"k8s.io/kubernetes/pkg/api"
 	clientset "k8s.io/kubernetes/pkg/client/clientset_generated/internalclientset"
@@ -70,13 +69,5 @@ func (ctrl *PersistentVolumeController) GetWriter() io.Writer {
 }
 
 func (ctrl *PersistentVolumeController) GetHostName() string {
-	return ""
-}
-
-func (ctrl *PersistentVolumeController) GetHostIP() (net.IP, error) {
-	return nil, fmt.Errorf("PersistentVolumeController.GetHostIP() is not implemented")
-}
-
-func (ctrl *PersistentVolumeController) GetRootContext() string {
 	return ""
 }

@@ -82,7 +82,6 @@ func (util *AWSDiskUtil) CreateVolume(c *awsElasticBlockStoreProvisioner) (strin
 	volumeOptions := &aws.VolumeOptions{
 		CapacityGB: requestGB,
 		Tags:       tags,
-		PVCName:    c.options.PVCName,
 	}
 
 	name, err := cloud.CreateDisk(volumeOptions)

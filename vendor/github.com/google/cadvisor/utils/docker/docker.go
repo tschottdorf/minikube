@@ -16,7 +16,6 @@ package docker
 
 import (
 	"fmt"
-	"os"
 	"strings"
 
 	dockertypes "github.com/docker/engine-api/types"
@@ -51,19 +50,8 @@ func DockerThinPoolName(info dockertypes.Info) (string, error) {
 
 func DockerMetadataDevice(info dockertypes.Info) (string, error) {
 	metadataDevice := DriverStatusValue(info.DriverStatus, DriverStatusMetadataFile)
-	if len(metadataDevice) != 0 {
-		return metadataDevice, nil
-	}
-
-	poolName, err := DockerThinPoolName(info)
-	if err != nil {
-		return "", err
-	}
-
-	metadataDevice = fmt.Sprintf("/dev/mapper/%s_tmeta", poolName)
-
-	if _, err := os.Stat(metadataDevice); err != nil {
-		return "", err
+	if len(metadataDevice) == 0 {
+		return "", fmt.Errorf("Could not get the devicemapper metadata device")
 	}
 
 	return metadataDevice, nil

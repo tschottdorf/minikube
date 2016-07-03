@@ -18,16 +18,18 @@ package flocker
 
 import (
 	"fmt"
+	"path"
 	"time"
 
+	flockerclient "github.com/ClusterHQ/flocker-go"
 	"k8s.io/kubernetes/pkg/api"
 	"k8s.io/kubernetes/pkg/types"
 	"k8s.io/kubernetes/pkg/util/env"
 	"k8s.io/kubernetes/pkg/util/exec"
 	"k8s.io/kubernetes/pkg/util/mount"
+	"k8s.io/kubernetes/pkg/util/strings"
 	"k8s.io/kubernetes/pkg/volume"
-
-	flockerclient "github.com/ClusterHQ/flocker-go"
+	volumeutil "k8s.io/kubernetes/pkg/volume/util"
 )
 
 const (
@@ -64,26 +66,13 @@ func (p *flockerPlugin) Init(host volume.VolumeHost) error {
 	return nil
 }
 
-func (p *flockerPlugin) GetPluginName() string {
+func (p flockerPlugin) Name() string {
 	return flockerPluginName
 }
 
-func (p *flockerPlugin) GetVolumeName(spec *volume.Spec) (string, error) {
-	volumeSource, _, err := getVolumeSource(spec)
-	if err != nil {
-		return "", err
-	}
-
-	return volumeSource.DatasetName, nil
-}
-
-func (p *flockerPlugin) CanSupport(spec *volume.Spec) bool {
+func (p flockerPlugin) CanSupport(spec *volume.Spec) bool {
 	return (spec.PersistentVolume != nil && spec.PersistentVolume.Spec.Flocker != nil) ||
 		(spec.Volume != nil && spec.Volume.Flocker != nil)
-}
-
-func (p *flockerPlugin) RequiresRemount() bool {
-	return false
 }
 
 func (p *flockerPlugin) getFlockerVolumeSource(spec *volume.Spec) (*api.FlockerVolumeSource, bool) {
@@ -154,13 +143,17 @@ func (b flockerMounter) newFlockerClient() (*flockerclient.Client, error) {
 	keyPath := env.GetEnvAsStringOrFallback("FLOCKER_CONTROL_SERVICE_CLIENT_KEY_FILE", defaultClientKeyFile)
 	certPath := env.GetEnvAsStringOrFallback("FLOCKER_CONTROL_SERVICE_CLIENT_CERT_FILE", defaultClientCertFile)
 
-	hostIP, err := b.plugin.host.GetHostIP()
-	if err != nil {
-		return nil, err
-	}
-
-	c, err := flockerclient.NewClient(host, port, hostIP.String(), caCertPath, keyPath, certPath)
+	c, err := flockerclient.NewClient(host, port, b.flocker.pod.Status.HostIP, caCertPath, keyPath, certPath)
 	return c, err
+}
+
+func (b *flockerMounter) getMetaDir() string {
+	return path.Join(
+		b.plugin.host.GetPodPluginDir(
+			b.flocker.pod.UID, strings.EscapeQualifiedNameForDisk(flockerPluginName),
+		),
+		b.datasetName,
+	)
 }
 
 /*
@@ -175,6 +168,10 @@ control service:
 5. Wait until the Primary UUID was updated or timeout.
 */
 func (b flockerMounter) SetUpAt(dir string, fsGroup *int64) error {
+	if volumeutil.IsReady(b.getMetaDir()) {
+		return nil
+	}
+
 	if b.client == nil {
 		c, err := b.newFlockerClient()
 		if err != nil {
@@ -211,6 +208,7 @@ func (b flockerMounter) SetUpAt(dir string, fsGroup *int64) error {
 		b.flocker.path = s.Path
 	}
 
+	volumeutil.SetReady(b.getMetaDir())
 	return nil
 }
 
@@ -242,15 +240,4 @@ func (b flockerMounter) updateDatasetPrimary(datasetID, primaryUUID string) erro
 		}
 	}
 
-}
-
-func getVolumeSource(spec *volume.Spec) (*api.FlockerVolumeSource, bool, error) {
-	if spec.Volume != nil && spec.Volume.Flocker != nil {
-		return spec.Volume.Flocker, spec.ReadOnly, nil
-	} else if spec.PersistentVolume != nil &&
-		spec.PersistentVolume.Spec.Flocker != nil {
-		return spec.PersistentVolume.Spec.Flocker, spec.ReadOnly, nil
-	}
-
-	return nil, false, fmt.Errorf("Spec does not reference a Flocker volume type")
 }

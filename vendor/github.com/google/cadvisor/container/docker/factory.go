@@ -22,7 +22,6 @@ import (
 	"strings"
 	"sync"
 
-	dockertypes "github.com/docker/engine-api/types"
 	"github.com/google/cadvisor/container"
 	"github.com/google/cadvisor/container/libcontainer"
 	"github.com/google/cadvisor/devicemapper"
@@ -172,31 +171,6 @@ var (
 	version_re            = regexp.MustCompile(version_regexp_string)
 )
 
-func startThinPoolWatcher(dockerInfo *dockertypes.Info) (*devicemapper.ThinPoolWatcher, error) {
-	_, err := devicemapper.ThinLsBinaryPresent()
-	if err != nil {
-		return nil, err
-	}
-
-	dockerThinPoolName, err := dockerutil.DockerThinPoolName(*dockerInfo)
-	if err != nil {
-		return nil, err
-	}
-
-	dockerMetadataDevice, err := dockerutil.DockerMetadataDevice(*dockerInfo)
-	if err != nil {
-		return nil, err
-	}
-
-	thinPoolWatcher, err := devicemapper.NewThinPoolWatcher(dockerThinPoolName, dockerMetadataDevice)
-	if err != nil {
-		return nil, err
-	}
-
-	go thinPoolWatcher.Start()
-	return thinPoolWatcher, nil
-}
-
 // Register root container before running this function!
 func Register(factory info.MachineInfoFactory, fsInfo fs.FsInfo, ignoreMetrics container.MetricSet) error {
 	client, err := Client()
@@ -217,15 +191,30 @@ func Register(factory info.MachineInfoFactory, fsInfo fs.FsInfo, ignoreMetrics c
 		return fmt.Errorf("failed to get cgroup subsystems: %v", err)
 	}
 
-	var thinPoolWatcher *devicemapper.ThinPoolWatcher
-	if storageDriver(dockerInfo.Driver) == devicemapperStorageDriver {
-		thinPoolWatcher, err = startThinPoolWatcher(dockerInfo)
+	var (
+		dockerStorageDriver                               = storageDriver(dockerInfo.Driver)
+		thinPoolWatcher     *devicemapper.ThinPoolWatcher = nil
+	)
+
+	if dockerStorageDriver == devicemapperStorageDriver {
+		// If the storage drive is devicemapper, create and start a
+		// ThinPoolWatcher to monitor the size of container CoW layers with
+		// thin_ls.
+		dockerThinPoolName, err := dockerutil.DockerThinPoolName(*dockerInfo)
 		if err != nil {
-			glog.Errorf("devicemapper filesystem stats will not be reported: %v", err)
+			return fmt.Errorf("couldn't find device mapper thin pool name: %v", err)
 		}
+
+		dockerMetadataDevice, err := dockerutil.DockerMetadataDevice(*dockerInfo)
+		if err != nil {
+			return fmt.Errorf("couldn't determine devicemapper metadata device")
+		}
+
+		thinPoolWatcher = devicemapper.NewThinPoolWatcher(dockerThinPoolName, dockerMetadataDevice)
+		go thinPoolWatcher.Start()
 	}
 
-	glog.Infof("Registering Docker factory")
+	glog.Infof("registering Docker factory")
 	f := &dockerFactory{
 		cgroupSubsystems:   cgroupSubsystems,
 		client:             client,

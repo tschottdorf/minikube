@@ -255,9 +255,9 @@ type stripVersionEncoder struct {
 	serializer runtime.Serializer
 }
 
-func (c stripVersionEncoder) Encode(obj runtime.Object, w io.Writer) error {
+func (c stripVersionEncoder) EncodeToStream(obj runtime.Object, w io.Writer, overrides ...unversioned.GroupVersion) error {
 	buf := bytes.NewBuffer([]byte{})
-	err := c.encoder.Encode(obj, buf)
+	err := c.encoder.EncodeToStream(obj, buf, overrides...)
 	if err != nil {
 		return err
 	}
@@ -268,7 +268,7 @@ func (c stripVersionEncoder) Encode(obj runtime.Object, w io.Writer) error {
 	gvk.Group = ""
 	gvk.Version = ""
 	roundTrippedObj.GetObjectKind().SetGroupVersionKind(*gvk)
-	return c.serializer.Encode(roundTrippedObj, w)
+	return c.serializer.EncodeToStream(roundTrippedObj, w)
 }
 
 // StripVersionNegotiatedSerializer will return stripVersionEncoder when
@@ -443,7 +443,7 @@ func writeNegotiated(s runtime.NegotiatedSerializer, gv unversioned.GroupVersion
 	w.WriteHeader(statusCode)
 
 	encoder := s.EncoderForVersion(serializer, gv)
-	if err := encoder.Encode(object, w); err != nil {
+	if err := encoder.EncodeToStream(object, w); err != nil {
 		errorJSONFatal(err, encoder, w)
 	}
 }

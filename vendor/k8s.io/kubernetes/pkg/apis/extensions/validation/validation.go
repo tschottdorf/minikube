@@ -198,21 +198,14 @@ func ValidateRollingUpdateDeployment(rollingUpdate *extensions.RollingUpdateDepl
 
 func ValidateDeploymentStrategy(strategy *extensions.DeploymentStrategy, fldPath *field.Path) field.ErrorList {
 	allErrs := field.ErrorList{}
+	if strategy.RollingUpdate == nil {
+		return allErrs
+	}
 	switch strategy.Type {
 	case extensions.RecreateDeploymentStrategyType:
-		if strategy.RollingUpdate != nil {
-			allErrs = append(allErrs, field.Forbidden(fldPath.Child("rollingUpdate"), "may not be specified when strategy `type` is '"+string(extensions.RecreateDeploymentStrategyType+"'")))
-		}
+		allErrs = append(allErrs, field.Forbidden(fldPath.Child("rollingUpdate"), "may not be specified when strategy `type` is '"+string(extensions.RecreateDeploymentStrategyType+"'")))
 	case extensions.RollingUpdateDeploymentStrategyType:
-		// This should never happen since it's set and checked in defaults.go
-		if strategy.RollingUpdate == nil {
-			allErrs = append(allErrs, field.Required(fldPath.Child("rollingUpdate"), "this should be defaulted and never be nil"))
-		} else {
-			allErrs = append(allErrs, ValidateRollingUpdateDeployment(strategy.RollingUpdate, fldPath.Child("rollingUpdate"))...)
-		}
-	default:
-		validValues := []string{string(extensions.RecreateDeploymentStrategyType), string(extensions.RollingUpdateDeploymentStrategyType)}
-		allErrs = append(allErrs, field.NotSupported(fldPath, strategy, validValues))
+		allErrs = append(allErrs, ValidateRollingUpdateDeployment(strategy.RollingUpdate, fldPath.Child("rollingUpdate"))...)
 	}
 	return allErrs
 }

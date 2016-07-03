@@ -90,9 +90,7 @@ func (r *Runtime) IsImagePresent(image kubecontainer.ImageSpec) (bool, error) {
 
 // ListImages lists all the available appc images on the machine by invoking 'rkt image list'.
 func (r *Runtime) ListImages() ([]kubecontainer.Image, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), r.requestTimeout)
-	defer cancel()
-	listResp, err := r.apisvc.ListImages(ctx, &rktapi.ListImagesRequest{})
+	listResp, err := r.apisvc.ListImages(context.Background(), &rktapi.ListImagesRequest{})
 	if err != nil {
 		return nil, fmt.Errorf("couldn't list images: %v", err)
 	}
@@ -157,9 +155,7 @@ func (r *Runtime) listImages(image string, detail bool) ([]*rktapi.Image, error)
 		return nil, err
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), r.requestTimeout)
-	defer cancel()
-	listResp, err := r.apisvc.ListImages(ctx, &rktapi.ListImagesRequest{
+	listResp, err := r.apisvc.ListImages(context.Background(), &rktapi.ListImagesRequest{
 		Detail: detail,
 		Filters: []*rktapi.ImageFilter{
 			{
@@ -235,9 +231,7 @@ func (r *Runtime) writeDockerAuthConfig(image string, credsSlice []credentialpro
 // ImageStats returns the image stat (total storage bytes).
 func (r *Runtime) ImageStats() (*kubecontainer.ImageStats, error) {
 	var imageStat kubecontainer.ImageStats
-	ctx, cancel := context.WithTimeout(context.Background(), r.requestTimeout)
-	defer cancel()
-	listResp, err := r.apisvc.ListImages(ctx, &rktapi.ListImagesRequest{})
+	listResp, err := r.apisvc.ListImages(context.Background(), &rktapi.ListImagesRequest{})
 	if err != nil {
 		return nil, fmt.Errorf("couldn't list images: %v", err)
 	}

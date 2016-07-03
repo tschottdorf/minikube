@@ -41,7 +41,9 @@ func addKnownTypes(scheme *runtime.Scheme) {
 		&Job{},
 		&JobList{},
 		&v1.ListOptions{},
-		&v1.DeleteOptions{},
 	)
 	versionedwatch.AddToGroupVersion(scheme, SchemeGroupVersion)
 }
+
+func (obj *Job) GetObjectKind() unversioned.ObjectKind     { return &obj.TypeMeta }
+func (obj *JobList) GetObjectKind() unversioned.ObjectKind { return &obj.TypeMeta }

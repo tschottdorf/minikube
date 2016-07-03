@@ -256,7 +256,7 @@ func (gc *GarbageCollector) orhpanDependents(owner objectReference, dependents [
 	if len(failedDependents) != 0 {
 		return fmt.Errorf("failed to orphan dependents of owner %s, got errors: %s", owner, utilerrors.NewAggregate(errorsSlice).Error())
 	}
-	glog.V(6).Infof("successfully updated all dependents")
+	fmt.Println("CHAO: successfully updated all dependents")
 	return nil
 }
 
@@ -443,9 +443,11 @@ func gcListWatcher(client *dynamic.Client, resource unversioned.GroupVersionReso
 			// namespaces if it's namespace scoped, so leave
 			// APIResource.Namespaced as false is all right.
 			apiResource := unversioned.APIResource{Name: resource.Resource}
-			return client.ParameterCodec(dynamic.VersionedParameterEncoderWithV1Fallback).
-				Resource(&apiResource, api.NamespaceAll).
-				List(&options)
+			// The default parameter codec used by the dynamic client cannot
+			// encode api.ListOptions.
+			// TODO: api.ParameterCodec doesn't support thirdparty objects.
+			// We need a generic parameter codec.
+			return client.ParameterCodec(api.ParameterCodec).Resource(&apiResource, api.NamespaceAll).List(&options)
 		},
 		WatchFunc: func(options api.ListOptions) (watch.Interface, error) {
 			// APIResource.Kind is not used by the dynamic client, so
@@ -453,9 +455,9 @@ func gcListWatcher(client *dynamic.Client, resource unversioned.GroupVersionReso
 			// namespaces if it's namespace scoped, so leave
 			// APIResource.Namespaced as false is all right.
 			apiResource := unversioned.APIResource{Name: resource.Resource}
-			return client.ParameterCodec(dynamic.VersionedParameterEncoderWithV1Fallback).
-				Resource(&apiResource, api.NamespaceAll).
-				Watch(&options)
+			// The default parameter codec used by the dynamic client cannot
+			// encode api.ListOptions.
+			return client.ParameterCodec(api.ParameterCodec).Resource(&apiResource, api.NamespaceAll).Watch(&options)
 		},
 	}
 }

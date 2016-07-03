@@ -113,10 +113,10 @@ func FieldPtr(v reflect.Value, fieldName string, dest interface{}) error {
 
 // EncodeList ensures that each object in an array is converted to a Unknown{} in serialized form.
 // TODO: accept a content type.
-func EncodeList(e Encoder, objects []Object) error {
+func EncodeList(e Encoder, objects []Object, overrides ...unversioned.GroupVersion) error {
 	var errs []error
 	for i := range objects {
-		data, err := Encode(e, objects[i])
+		data, err := Encode(e, objects[i], overrides...)
 		if err != nil {
 			errs = append(errs, err)
 			continue

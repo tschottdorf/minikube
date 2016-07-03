@@ -41,7 +41,6 @@ func addKnownTypes(scheme *runtime.Scheme) {
 		&PetSet{},
 		&PetSetList{},
 		&v1.ListOptions{},
-		&v1.DeleteOptions{},
 	)
 	versionedwatch.AddToGroupVersion(scheme, SchemeGroupVersion)
 }

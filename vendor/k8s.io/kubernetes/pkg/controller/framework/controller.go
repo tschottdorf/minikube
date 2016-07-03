@@ -124,7 +124,8 @@ func (c *Controller) Requeue(obj interface{}) error {
 // concurrently.
 func (c *Controller) processLoop() {
 	for {
-		obj, err := c.config.Queue.Pop(cache.PopProcessFunc(c.config.Process))
+		obj := c.config.Queue.Pop()
+		err := c.config.Process(obj)
 		if err != nil {
 			if c.config.RetryOnError {
 				// This is the safe way to re-enqueue.

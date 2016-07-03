@@ -590,9 +590,10 @@ func (m *Master) NewBootstrapController() *Controller {
 	return &Controller{
 		NamespaceRegistry: m.namespaceRegistry,
 		ServiceRegistry:   m.serviceRegistry,
+		MasterCount:       m.MasterCount,
 
-		EndpointReconciler: NewMasterCountEndpointReconciler(m.MasterCount, m.endpointRegistry),
-		EndpointInterval:   10 * time.Second,
+		EndpointRegistry: m.endpointRegistry,
+		EndpointInterval: 10 * time.Second,
 
 		SystemNamespaces:         []string{api.NamespaceSystem},
 		SystemNamespacesInterval: 1 * time.Minute,

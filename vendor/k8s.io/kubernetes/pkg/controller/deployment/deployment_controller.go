@@ -772,19 +772,16 @@ func (dc *DeploymentController) rsAndPodsWithHashKeySynced(deployment *extension
 		}
 		syncedRSList = append(syncedRSList, *syncedRS)
 	}
-	syncedPodList, err := dc.listPods(deployment)
-	if err != nil {
-		return nil, nil, err
-	}
-	return syncedRSList, syncedPodList, nil
-}
-
-func (dc *DeploymentController) listPods(deployment *extensions.Deployment) (*api.PodList, error) {
-	return deploymentutil.ListPods(deployment,
+	syncedPodList, err := deploymentutil.ListPods(deployment,
 		func(namespace string, options api.ListOptions) (*api.PodList, error) {
 			podList, err := dc.podStore.Pods(namespace).List(options.LabelSelector)
 			return &podList, err
 		})
+
+	if err != nil {
+		return nil, nil, err
+	}
+	return syncedRSList, syncedPodList, nil
 }
 
 // addHashKeyToRSAndPods adds pod-template-hash information to the given rs, if it's not already there, with the following steps:
@@ -980,14 +977,6 @@ func (dc *DeploymentController) reconcileNewReplicaSet(allRSs []*extensions.Repl
 	return scaled, err
 }
 
-func (dc *DeploymentController) getAvailablePodsForReplicaSets(deployment *extensions.Deployment, rss []*extensions.ReplicaSet, minReadySeconds int32) (int32, error) {
-	podList, err := dc.listPods(deployment)
-	if err != nil {
-		return 0, err
-	}
-	return deploymentutil.CountAvailablePodsForReplicaSets(podList, rss, minReadySeconds)
-}
-
 func (dc *DeploymentController) reconcileOldReplicaSets(allRSs []*extensions.ReplicaSet, oldRSs []*extensions.ReplicaSet, newRS *extensions.ReplicaSet, deployment *extensions.Deployment) (bool, error) {
 	oldPodsCount := deploymentutil.GetReplicaCountForReplicaSets(oldRSs)
 	if oldPodsCount == 0 {
@@ -997,8 +986,7 @@ func (dc *DeploymentController) reconcileOldReplicaSets(allRSs []*extensions.Rep
 
 	minReadySeconds := deployment.Spec.MinReadySeconds
 	allPodsCount := deploymentutil.GetReplicaCountForReplicaSets(allRSs)
-	// TODO: use dc.getAvailablePodsForReplicaSets instead
-	newRSAvailablePodCount, err := deploymentutil.GetAvailablePodsForReplicaSets(dc.client, deployment, []*extensions.ReplicaSet{newRS}, minReadySeconds)
+	newRSAvailablePodCount, err := deploymentutil.GetAvailablePodsForReplicaSets(dc.client, []*extensions.ReplicaSet{newRS}, minReadySeconds)
 	if err != nil {
 		return false, fmt.Errorf("could not find available pods: %v", err)
 	}
@@ -1047,7 +1035,7 @@ func (dc *DeploymentController) reconcileOldReplicaSets(allRSs []*extensions.Rep
 
 	// Clean up unhealthy replicas first, otherwise unhealthy replicas will block deployment
 	// and cause timeout. See https://github.com/kubernetes/kubernetes/issues/16737
-	oldRSs, cleanupCount, err := dc.cleanupUnhealthyReplicas(oldRSs, deployment, deployment.Spec.MinReadySeconds, maxScaledDown)
+	oldRSs, cleanupCount, err := dc.cleanupUnhealthyReplicas(oldRSs, deployment, maxScaledDown)
 	if err != nil {
 		return false, nil
 	}
@@ -1066,7 +1054,7 @@ func (dc *DeploymentController) reconcileOldReplicaSets(allRSs []*extensions.Rep
 }
 
 // cleanupUnhealthyReplicas will scale down old replica sets with unhealthy replicas, so that all unhealthy replicas will be deleted.
-func (dc *DeploymentController) cleanupUnhealthyReplicas(oldRSs []*extensions.ReplicaSet, deployment *extensions.Deployment, minReadySeconds, maxCleanupCount int32) ([]*extensions.ReplicaSet, int32, error) {
+func (dc *DeploymentController) cleanupUnhealthyReplicas(oldRSs []*extensions.ReplicaSet, deployment *extensions.Deployment, maxCleanupCount int32) ([]*extensions.ReplicaSet, int32, error) {
 	sort.Sort(controller.ReplicaSetsByCreationTimestamp(oldRSs))
 	// Safely scale down all old replica sets with unhealthy replicas. Replica set will sort the pods in the order
 	// such that not-ready < ready, unscheduled < scheduled, and pending < running. This ensures that unhealthy replicas will
@@ -1080,17 +1068,16 @@ func (dc *DeploymentController) cleanupUnhealthyReplicas(oldRSs []*extensions.Re
 			// cannot scale down this replica set.
 			continue
 		}
-		// TODO: use dc.getAvailablePodsForReplicaSets instead
-		availablePodCount, err := deploymentutil.GetAvailablePodsForReplicaSets(dc.client, deployment, []*extensions.ReplicaSet{targetRS}, minReadySeconds)
+		readyPodCount, err := deploymentutil.GetAvailablePodsForReplicaSets(dc.client, []*extensions.ReplicaSet{targetRS}, 0)
 		if err != nil {
 			return nil, totalScaledDown, fmt.Errorf("could not find available pods: %v", err)
 		}
-		if targetRS.Spec.Replicas == availablePodCount {
+		if targetRS.Spec.Replicas == readyPodCount {
 			// no unhealthy replicas found, no scaling required.
 			continue
 		}
 
-		scaledDownCount := int32(integer.IntMin(int(maxCleanupCount-totalScaledDown), int(targetRS.Spec.Replicas-availablePodCount)))
+		scaledDownCount := int32(integer.IntMin(int(maxCleanupCount-totalScaledDown), int(targetRS.Spec.Replicas-readyPodCount)))
 		newReplicasCount := targetRS.Spec.Replicas - scaledDownCount
 		if newReplicasCount > targetRS.Spec.Replicas {
 			return nil, 0, fmt.Errorf("when cleaning up unhealthy replicas, got invalid request to scale down %s/%s %d -> %d", targetRS.Namespace, targetRS.Name, targetRS.Spec.Replicas, newReplicasCount)
@@ -1117,8 +1104,7 @@ func (dc *DeploymentController) scaleDownOldReplicaSetsForRollingUpdate(allRSs [
 	minAvailable := deployment.Spec.Replicas - maxUnavailable
 	minReadySeconds := deployment.Spec.MinReadySeconds
 	// Find the number of ready pods.
-	// TODO: use dc.getAvailablePodsForReplicaSets instead
-	availablePodCount, err := deploymentutil.GetAvailablePodsForReplicaSets(dc.client, deployment, allRSs, minReadySeconds)
+	availablePodCount, err := deploymentutil.GetAvailablePodsForReplicaSets(dc.client, allRSs, minReadySeconds)
 	if err != nil {
 		return 0, fmt.Errorf("could not find available pods: %v", err)
 	}
@@ -1234,7 +1220,7 @@ func (dc *DeploymentController) calculateStatus(allRSs []*extensions.ReplicaSet,
 	totalActualReplicas = deploymentutil.GetActualReplicaCountForReplicaSets(allRSs)
 	updatedReplicas = deploymentutil.GetActualReplicaCountForReplicaSets([]*extensions.ReplicaSet{newRS})
 	minReadySeconds := deployment.Spec.MinReadySeconds
-	availableReplicas, err = dc.getAvailablePodsForReplicaSets(deployment, allRSs, minReadySeconds)
+	availableReplicas, err = deploymentutil.GetAvailablePodsForReplicaSets(dc.client, allRSs, minReadySeconds)
 	if err != nil {
 		err = fmt.Errorf("failed to count available pods: %v", err)
 		return

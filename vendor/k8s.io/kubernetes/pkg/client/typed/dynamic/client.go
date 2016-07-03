@@ -253,8 +253,8 @@ func (dynamicCodec) Decode(data []byte, gvk *unversioned.GroupVersionKind, obj r
 	return obj, gvk, nil
 }
 
-func (dynamicCodec) Encode(obj runtime.Object, w io.Writer) error {
-	return runtime.UnstructuredJSONScheme.Encode(obj, w)
+func (dynamicCodec) EncodeToStream(obj runtime.Object, w io.Writer, overrides ...unversioned.GroupVersion) error {
+	return runtime.UnstructuredJSONScheme.EncodeToStream(obj, w, overrides...)
 }
 
 // paramaterCodec is a codec converts an API object to query
@@ -270,26 +270,3 @@ func (parameterCodec) DecodeParameters(parameters url.Values, from unversioned.G
 }
 
 var defaultParameterEncoder runtime.ParameterCodec = parameterCodec{}
-
-type versionedParameterEncoderWithV1Fallback struct{}
-
-func (versionedParameterEncoderWithV1Fallback) EncodeParameters(obj runtime.Object, to unversioned.GroupVersion) (url.Values, error) {
-	ret, err := api.ParameterCodec.EncodeParameters(obj, to)
-	if err != nil && runtime.IsNotRegisteredError(err) {
-		// fallback to v1
-		return api.ParameterCodec.EncodeParameters(obj, v1.SchemeGroupVersion)
-	}
-	return ret, err
-}
-
-func (versionedParameterEncoderWithV1Fallback) DecodeParameters(parameters url.Values, from unversioned.GroupVersion, into runtime.Object) error {
-	return errors.New("DecodeParameters not implemented on versionedParameterEncoderWithV1Fallback")
-}
-
-// VersionedParameterEncoderWithV1Fallback is useful for encoding query
-// parameters for thirdparty resources. It tries to convert object to the
-// specified version before converting it to query parameters, and falls back to
-// converting to v1 if the object is not registered in the specified version.
-// For the record, currently API server always treats query parameters sent to a
-// thirdparty resource endpoint as v1.
-var VersionedParameterEncoderWithV1Fallback runtime.ParameterCodec = versionedParameterEncoderWithV1Fallback{}

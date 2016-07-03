@@ -33,8 +33,6 @@ func init() {
 		Convert_api_AWSElasticBlockStoreVolumeSource_To_v1_AWSElasticBlockStoreVolumeSource,
 		Convert_v1_Affinity_To_api_Affinity,
 		Convert_api_Affinity_To_v1_Affinity,
-		Convert_v1_AttachedVolume_To_api_AttachedVolume,
-		Convert_api_AttachedVolume_To_v1_AttachedVolume,
 		Convert_v1_AzureFileVolumeSource_To_api_AzureFileVolumeSource,
 		Convert_api_AzureFileVolumeSource_To_v1_AzureFileVolumeSource,
 		Convert_v1_Binding_To_api_Binding,
@@ -425,26 +423,6 @@ func autoConvert_api_Affinity_To_v1_Affinity(in *api.Affinity, out *Affinity, s 
 
 func Convert_api_Affinity_To_v1_Affinity(in *api.Affinity, out *Affinity, s conversion.Scope) error {
 	return autoConvert_api_Affinity_To_v1_Affinity(in, out, s)
-}
-
-func autoConvert_v1_AttachedVolume_To_api_AttachedVolume(in *AttachedVolume, out *api.AttachedVolume, s conversion.Scope) error {
-	out.Name = api.UniqueVolumeName(in.Name)
-	out.DevicePath = in.DevicePath
-	return nil
-}
-
-func Convert_v1_AttachedVolume_To_api_AttachedVolume(in *AttachedVolume, out *api.AttachedVolume, s conversion.Scope) error {
-	return autoConvert_v1_AttachedVolume_To_api_AttachedVolume(in, out, s)
-}
-
-func autoConvert_api_AttachedVolume_To_v1_AttachedVolume(in *api.AttachedVolume, out *AttachedVolume, s conversion.Scope) error {
-	out.Name = UniqueVolumeName(in.Name)
-	out.DevicePath = in.DevicePath
-	return nil
-}
-
-func Convert_api_AttachedVolume_To_v1_AttachedVolume(in *api.AttachedVolume, out *AttachedVolume, s conversion.Scope) error {
-	return autoConvert_api_AttachedVolume_To_v1_AttachedVolume(in, out, s)
 }
 
 func autoConvert_v1_AzureFileVolumeSource_To_api_AzureFileVolumeSource(in *AzureFileVolumeSource, out *api.AzureFileVolumeSource, s conversion.Scope) error {
@@ -3412,23 +3390,12 @@ func autoConvert_v1_NodeStatus_To_api_NodeStatus(in *NodeStatus, out *api.NodeSt
 	}
 	if in.VolumesInUse != nil {
 		in, out := &in.VolumesInUse, &out.VolumesInUse
-		*out = make([]api.UniqueVolumeName, len(*in))
+		*out = make([]api.UniqueDeviceName, len(*in))
 		for i := range *in {
-			(*out)[i] = api.UniqueVolumeName((*in)[i])
+			(*out)[i] = api.UniqueDeviceName((*in)[i])
 		}
 	} else {
 		out.VolumesInUse = nil
-	}
-	if in.VolumesAttached != nil {
-		in, out := &in.VolumesAttached, &out.VolumesAttached
-		*out = make([]api.AttachedVolume, len(*in))
-		for i := range *in {
-			if err := Convert_v1_AttachedVolume_To_api_AttachedVolume(&(*in)[i], &(*out)[i], s); err != nil {
-				return err
-			}
-		}
-	} else {
-		out.VolumesAttached = nil
 	}
 	return nil
 }
@@ -3506,23 +3473,12 @@ func autoConvert_api_NodeStatus_To_v1_NodeStatus(in *api.NodeStatus, out *NodeSt
 	}
 	if in.VolumesInUse != nil {
 		in, out := &in.VolumesInUse, &out.VolumesInUse
-		*out = make([]UniqueVolumeName, len(*in))
+		*out = make([]UniqueDeviceName, len(*in))
 		for i := range *in {
-			(*out)[i] = UniqueVolumeName((*in)[i])
+			(*out)[i] = UniqueDeviceName((*in)[i])
 		}
 	} else {
 		out.VolumesInUse = nil
-	}
-	if in.VolumesAttached != nil {
-		in, out := &in.VolumesAttached, &out.VolumesAttached
-		*out = make([]AttachedVolume, len(*in))
-		for i := range *in {
-			if err := Convert_api_AttachedVolume_To_v1_AttachedVolume(&(*in)[i], &(*out)[i], s); err != nil {
-				return err
-			}
-		}
-	} else {
-		out.VolumesAttached = nil
 	}
 	return nil
 }

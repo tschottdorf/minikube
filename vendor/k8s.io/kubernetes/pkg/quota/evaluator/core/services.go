@@ -38,7 +38,6 @@ func NewServiceEvaluator(kubeClient clientset.Interface) quota.Evaluator {
 		InternalGroupKind: api.Kind("Service"),
 		InternalOperationResources: map[admission.Operation][]api.ResourceName{
 			admission.Create: allResources,
-			admission.Update: allResources,
 		},
 		MatchedResourceNames: allResources,
 		MatchesScopeFunc:     generic.MatchesNoScopeFunc,

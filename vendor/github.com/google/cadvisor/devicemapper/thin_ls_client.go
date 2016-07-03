@@ -24,38 +24,24 @@ import (
 	"github.com/golang/glog"
 )
 
-// thinLsClient knows how to run a thin_ls very specific to CoW usage for
-// containers.
+// thinLsClient knows how to run a thin_ls very specific to CoW usage for containers.
 type thinLsClient interface {
-	// ThinLs runs a thin ls on the given device, which is expected to be a
-	// metadata device. The caller must hold the metadata snapshot for the
-	// device.
 	ThinLs(deviceName string) (map[string]uint64, error)
 }
 
-// newThinLsClient returns a thinLsClient or an error if the thin_ls binary
-// couldn't be located.
-func newThinLsClient() (thinLsClient, error) {
-	thinLsPath, err := ThinLsBinaryPresent()
-	if err != nil {
-		return nil, fmt.Errorf("error creating thin_ls client: %v", err)
-	}
-
-	return &defaultThinLsClient{thinLsPath}, nil
+func newThinLsClient() thinLsClient {
+	return &defaultThinLsClient{}
 }
 
-// defaultThinLsClient is a functional thinLsClient
-type defaultThinLsClient struct {
-	thinLsPath string
-}
+type defaultThinLsClient struct{}
 
 var _ thinLsClient = &defaultThinLsClient{}
 
-func (c *defaultThinLsClient) ThinLs(deviceName string) (map[string]uint64, error) {
+func (*defaultThinLsClient) ThinLs(deviceName string) (map[string]uint64, error) {
 	args := []string{"--no-headers", "-m", "-o", "DEV,EXCLUSIVE_BYTES", deviceName}
 	glog.V(4).Infof("running command: thin_ls %v", strings.Join(args, " "))
 
-	output, err := exec.Command(c.thinLsPath, args...).Output()
+	output, err := exec.Command("thin_ls", args...).Output()
 	if err != nil {
 		return nil, fmt.Errorf("Error running command `thin_ls %v`: %v\noutput:\n\n%v", strings.Join(args, " "), err, string(output))
 	}
@@ -63,8 +49,7 @@ func (c *defaultThinLsClient) ThinLs(deviceName string) (map[string]uint64, erro
 	return parseThinLsOutput(output), nil
 }
 
-// parseThinLsOutput parses the output returned by thin_ls to build a map of
-// device id -> usage.
+// parseThinLsOutput parses the output returned by thin_ls to build a map of device id -> usage.
 func parseThinLsOutput(output []byte) map[string]uint64 {
 	cache := map[string]uint64{}
 

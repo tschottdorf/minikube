@@ -53,6 +53,15 @@ func (plugin *gcePersistentDiskPlugin) NewAttacher() (volume.Attacher, error) {
 	}, nil
 }
 
+func (plugin *gcePersistentDiskPlugin) GetDeviceName(spec *volume.Spec) (string, error) {
+	volumeSource, _ := getVolumeSource(spec)
+	if volumeSource == nil {
+		return "", fmt.Errorf("Spec does not reference a GCE volume type")
+	}
+
+	return volumeSource.PDName, nil
+}
+
 // Attach checks with the GCE cloud provider if the specified volume is already
 // attached to the specified node. If the volume is attached, it succeeds
 // (returns nil). If it is not, Attach issues a call to the GCE cloud provider
@@ -60,12 +69,8 @@ func (plugin *gcePersistentDiskPlugin) NewAttacher() (volume.Attacher, error) {
 // Callers are responsible for retryinging on failure.
 // Callers are responsible for thread safety between concurrent attach and
 // detach operations.
-func (attacher *gcePersistentDiskAttacher) Attach(spec *volume.Spec, hostName string) (string, error) {
-	volumeSource, readOnly, err := getVolumeSource(spec)
-	if err != nil {
-		return "", err
-	}
-
+func (attacher *gcePersistentDiskAttacher) Attach(spec *volume.Spec, hostName string) error {
+	volumeSource, readOnly := getVolumeSource(spec)
 	pdName := volumeSource.PDName
 
 	attached, err := attacher.gceDisks.DiskIsAttached(pdName, hostName)
@@ -79,27 +84,24 @@ func (attacher *gcePersistentDiskAttacher) Attach(spec *volume.Spec, hostName st
 	if err == nil && attached {
 		// Volume is already attached to node.
 		glog.Infof("Attach operation is successful. PD %q is already attached to node %q.", pdName, hostName)
-	} else {
-		if err := attacher.gceDisks.AttachDisk(pdName, hostName, readOnly); err != nil {
-			glog.Errorf("Error attaching PD %q to node %q: %+v", pdName, hostName, err)
-			return "", err
-		}
+		return nil
 	}
 
-	return path.Join(diskByIdPath, diskGooglePrefix+pdName), nil
+	if err = attacher.gceDisks.AttachDisk(pdName, hostName, readOnly); err != nil {
+		glog.Errorf("Error attaching PD %q to node %q: %+v", pdName, hostName, err)
+		return err
+	}
+
+	return nil
 }
 
-func (attacher *gcePersistentDiskAttacher) WaitForAttach(spec *volume.Spec, devicePath string, timeout time.Duration) (string, error) {
+func (attacher *gcePersistentDiskAttacher) WaitForAttach(spec *volume.Spec, timeout time.Duration) (string, error) {
 	ticker := time.NewTicker(checkSleepDuration)
 	defer ticker.Stop()
 	timer := time.NewTimer(timeout)
 	defer timer.Stop()
 
-	volumeSource, _, err := getVolumeSource(spec)
-	if err != nil {
-		return "", err
-	}
-
+	volumeSource, _ := getVolumeSource(spec)
 	pdName := volumeSource.PDName
 	partition := ""
 	if volumeSource.Partition != 0 {
@@ -132,19 +134,13 @@ func (attacher *gcePersistentDiskAttacher) WaitForAttach(spec *volume.Spec, devi
 	}
 }
 
-func (attacher *gcePersistentDiskAttacher) GetDeviceMountPath(
-	spec *volume.Spec) (string, error) {
-	volumeSource, _, err := getVolumeSource(spec)
-	if err != nil {
-		return "", err
-	}
-
-	return makeGlobalPDName(attacher.host, volumeSource.PDName), nil
+func (attacher *gcePersistentDiskAttacher) GetDeviceMountPath(spec *volume.Spec) string {
+	volumeSource, _ := getVolumeSource(spec)
+	return makeGlobalPDName(attacher.host, volumeSource.PDName)
 }
 
-func (attacher *gcePersistentDiskAttacher) MountDevice(spec *volume.Spec, devicePath string, deviceMountPath string) error {
+func (attacher *gcePersistentDiskAttacher) MountDevice(spec *volume.Spec, devicePath string, deviceMountPath string, mounter mount.Interface) error {
 	// Only mount the PD globally once.
-	mounter := attacher.host.GetMounter()
 	notMnt, err := mounter.IsLikelyNotMountPoint(deviceMountPath)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -157,10 +153,7 @@ func (attacher *gcePersistentDiskAttacher) MountDevice(spec *volume.Spec, device
 		}
 	}
 
-	volumeSource, readOnly, err := getVolumeSource(spec)
-	if err != nil {
-		return err
-	}
+	volumeSource, readOnly := getVolumeSource(spec)
 
 	options := []string{}
 	if readOnly {
@@ -173,13 +166,11 @@ func (attacher *gcePersistentDiskAttacher) MountDevice(spec *volume.Spec, device
 			os.Remove(deviceMountPath)
 			return err
 		}
-		glog.V(4).Infof("formatting spec %v devicePath %v deviceMountPath %v fs %v with options %+v", spec.Name(), devicePath, deviceMountPath, volumeSource.FSType, options)
 	}
 	return nil
 }
 
 type gcePersistentDiskDetacher struct {
-	host     volume.VolumeHost
 	gceDisks gce.Disks
 }
 
@@ -192,7 +183,6 @@ func (plugin *gcePersistentDiskPlugin) NewDetacher() (volume.Detacher, error) {
 	}
 
 	return &gcePersistentDiskDetacher{
-		host:     plugin.host,
 		gceDisks: gceCloud,
 	}, nil
 }
@@ -250,6 +240,6 @@ func (detacher *gcePersistentDiskDetacher) WaitForDetach(devicePath string, time
 	}
 }
 
-func (detacher *gcePersistentDiskDetacher) UnmountDevice(deviceMountPath string) error {
-	return unmountPDAndRemoveGlobalPath(deviceMountPath, detacher.host.GetMounter())
+func (detacher *gcePersistentDiskDetacher) UnmountDevice(deviceMountPath string, mounter mount.Interface) error {
+	return unmountPDAndRemoveGlobalPath(deviceMountPath, mounter)
 }

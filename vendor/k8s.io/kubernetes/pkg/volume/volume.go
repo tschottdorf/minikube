@@ -24,6 +24,7 @@ import (
 
 	"k8s.io/kubernetes/pkg/api"
 	"k8s.io/kubernetes/pkg/api/resource"
+	"k8s.io/kubernetes/pkg/util/mount"
 )
 
 // Volume represents a directory used by pods or hosts on a node. All method
@@ -134,25 +135,23 @@ type Deleter interface {
 
 // Attacher can attach a volume to a node.
 type Attacher interface {
-	// Attaches the volume specified by the given spec to the given host.
-	// On success, returns the device path where the device was attache don the
-	// node.
-	Attach(spec *Spec, hostName string) (string, error)
+	// Attach the volume specified by the given spec to the given host
+	Attach(spec *Spec, hostName string) error
 
 	// WaitForAttach blocks until the device is attached to this
 	// node. If it successfully attaches, the path to the device
 	// is returned. Otherwise, if the device does not attach after
 	// the given timeout period, an error will be returned.
-	WaitForAttach(spec *Spec, devicePath string, timeout time.Duration) (string, error)
+	WaitForAttach(spec *Spec, timeout time.Duration) (string, error)
 
 	// GetDeviceMountPath returns a path where the device should
 	// be mounted after it is attached. This is a global mount
 	// point which should be bind mounted for individual volumes.
-	GetDeviceMountPath(spec *Spec) (string, error)
+	GetDeviceMountPath(spec *Spec) string
 
 	// MountDevice mounts the disk to a global path which
 	// individual pods can then bind mount
-	MountDevice(spec *Spec, devicePath string, deviceMountPath string) error
+	MountDevice(spec *Spec, devicePath string, deviceMountPath string, mounter mount.Interface) error
 }
 
 // Detacher can detach a volume from a node.
@@ -168,7 +167,7 @@ type Detacher interface {
 	// UnmountDevice unmounts the global mount of the disk. This
 	// should only be called once all bind mounts have been
 	// unmounted.
-	UnmountDevice(deviceMountPath string) error
+	UnmountDevice(deviceMountPath string, mounter mount.Interface) error
 }
 
 func RenameDirectory(oldPath, newName string) (string, error) {

@@ -23,7 +23,6 @@ import (
 	"path"
 	"strconv"
 	"strings"
-	"time"
 
 	dockerref "github.com/docker/distribution/reference"
 	"github.com/docker/docker/pkg/jsonmessage"
@@ -312,11 +311,8 @@ func getDockerClient(dockerEndpoint string) (*dockerapi.Client, error) {
 
 // ConnectToDockerOrDie creates docker client connecting to docker daemon.
 // If the endpoint passed in is "fake://", a fake docker client
-// will be returned. The program exits if error occurs. The requestTimeout
-// is the timeout for docker requests. If timeout is exceeded, the request
-// will be cancelled and throw out an error. If requestTimeout is 0, a default
-// value will be applied.
-func ConnectToDockerOrDie(dockerEndpoint string, requestTimeout time.Duration) DockerInterface {
+// will be returned. The program exits if error occurs.
+func ConnectToDockerOrDie(dockerEndpoint string) DockerInterface {
 	if dockerEndpoint == "fake://" {
 		return NewFakeDockerClient()
 	}
@@ -324,8 +320,7 @@ func ConnectToDockerOrDie(dockerEndpoint string, requestTimeout time.Duration) D
 	if err != nil {
 		glog.Fatalf("Couldn't connect to docker: %v", err)
 	}
-	glog.Infof("Start docker client with request timeout=%v", requestTimeout)
-	return newKubeDockerClient(client, requestTimeout)
+	return newKubeDockerClient(client)
 }
 
 // milliCPUToQuota converts milliCPU to CFS quota and period values

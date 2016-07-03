@@ -67,13 +67,9 @@ import (
 const (
 	DockerType = "docker"
 
-	// https://docs.docker.com/engine/reference/api/docker_remote_api/
-	// docker verison should be at least 1.9.x
-	minimumDockerAPIVersion = "1.21"
+	minimumDockerAPIVersion = "1.20"
 
-	// Remote API version for docker daemon version v1.10
-	// https://docs.docker.com/engine/reference/api/docker_remote_api/
-	dockerV110APIVersion = "1.22"
+	dockerv110APIVersion = "1.21"
 
 	// ndots specifies the minimum number of dots that a domain name must contain for the resolver to consider it as FQDN (fully-qualified)
 	// we want to able to consider SRV lookup names like _dns._udp.kube-dns.default.svc to be considered relative.
@@ -93,6 +89,10 @@ const (
 	// '{{.HostConfig.NetworkMode}}'.
 	namespaceModeHost = "host"
 
+	// Remote API version for docker daemon version v1.10
+	// https://docs.docker.com/engine/reference/api/docker_remote_api/
+	dockerV110APIVersion = "1.22"
+
 	// The expiration time of version cache.
 	versionCacheTTL = 60 * time.Second
 )
@@ -104,8 +104,8 @@ var (
 	// TODO: make this a TTL based pull (if image older than X policy, pull)
 	podInfraContainerImagePullPolicy = api.PullIfNotPresent
 
-	// Default security option, only seccomp for now
-	defaultSeccompProfile = "unconfined"
+	// Default set of security options.
+	defaultSecurityOpt = []string{"seccomp:unconfined"}
 )
 
 type DockerManager struct {
@@ -558,7 +558,7 @@ func (dm *DockerManager) runContainer(
 		ContainerName: container.Name,
 	}
 
-	securityOpts, err := dm.getSecurityOpts(pod, container.Name)
+	securityOpts, err := dm.getSecurityOpt(pod, container.Name)
 	if err != nil {
 		return kubecontainer.ContainerID{}, err
 	}
@@ -645,7 +645,7 @@ func (dm *DockerManager) runContainer(
 	}
 
 	// If current api version is newer than docker 1.10 requested, set OomScoreAdj to HostConfig
-	result, err := dm.checkDockerAPIVersion(dockerV110APIVersion)
+	result, err := dm.checkDockerAPIVersion(dockerv110APIVersion)
 	if err != nil {
 		glog.Errorf("Failed to check docker api version: %v", err)
 	} else if result >= 0 {
@@ -977,7 +977,7 @@ func (dm *DockerManager) checkVersionCompatibility() error {
 	return nil
 }
 
-func (dm *DockerManager) getSecurityOpts(pod *api.Pod, ctrName string) ([]string, error) {
+func (dm *DockerManager) getSecurityOpt(pod *api.Pod, ctrName string) ([]string, error) {
 	version, err := dm.APIVersion()
 	if err != nil {
 		return nil, err
@@ -988,31 +988,24 @@ func (dm *DockerManager) getSecurityOpts(pod *api.Pod, ctrName string) ([]string
 	if err != nil {
 		return nil, err
 	}
-	var optFmt string
-	switch {
-	case result < 0:
-		return nil, nil // return early for Docker < 1.10
-	case result == 0:
-		optFmt = "%s:%s" // use colon notation for Docker 1.10
-	case result > 0:
-		optFmt = "%s=%s" // use = notation for Docker >= 1.11
+	if result < 0 {
+		// return early for old versions
+		return nil, nil
 	}
 
-	defaultSecurityOpts := []string{fmt.Sprintf(optFmt, "seccomp", defaultSeccompProfile)}
-
-	profile, profileOK := pod.ObjectMeta.Annotations[api.SeccompContainerAnnotationKeyPrefix+ctrName]
+	profile, profileOK := pod.ObjectMeta.Annotations["security.alpha.kubernetes.io/seccomp/container/"+ctrName]
 	if !profileOK {
 		// try the pod profile
-		profile, profileOK = pod.ObjectMeta.Annotations[api.SeccompPodAnnotationKey]
+		profile, profileOK = pod.ObjectMeta.Annotations["security.alpha.kubernetes.io/seccomp/pod"]
 		if !profileOK {
 			// return early the default
-			return defaultSecurityOpts, nil
+			return defaultSecurityOpt, nil
 		}
 	}
 
 	if profile == "unconfined" {
 		// return early the default
-		return defaultSecurityOpts, nil
+		return defaultSecurityOpt, nil
 	}
 
 	if profile == "docker/default" {
@@ -1020,15 +1013,13 @@ func (dm *DockerManager) getSecurityOpts(pod *api.Pod, ctrName string) ([]string
 		return nil, nil
 	}
 
-	if !strings.HasPrefix(profile, "localhost/") {
+	if !strings.HasPrefix(profile, "localhost") {
 		return nil, fmt.Errorf("unknown seccomp profile option: %s", profile)
 	}
 
-	name := strings.TrimPrefix(profile, "localhost/") // by pod annotation validation, name is a valid subpath
-	fname := filepath.Join(dm.seccompProfileRoot, filepath.FromSlash(name))
-	file, err := ioutil.ReadFile(fname)
+	file, err := ioutil.ReadFile(filepath.Join(dm.seccompProfileRoot, strings.TrimPrefix(profile, "localhost/")))
 	if err != nil {
-		return nil, fmt.Errorf("cannot load seccomp profile %q: %v", name, err)
+		return nil, err
 	}
 
 	b := bytes.NewBuffer(nil)
@@ -1036,7 +1027,7 @@ func (dm *DockerManager) getSecurityOpts(pod *api.Pod, ctrName string) ([]string
 		return nil, err
 	}
 
-	return []string{fmt.Sprintf(optFmt, "seccomp", b.Bytes())}, nil
+	return []string{fmt.Sprintf("seccomp=%s", b.Bytes())}, nil
 }
 
 type dockerExitError struct {
@@ -1164,6 +1155,41 @@ func (dm *DockerManager) PortForward(pod *kubecontainer.Pod, port uint16, stream
 	}
 
 	return nil
+}
+
+// Get the IP address of a container's interface using nsenter
+func (dm *DockerManager) GetContainerIP(containerID, interfaceName string) (string, error) {
+	_, lookupErr := exec.LookPath("nsenter")
+	if lookupErr != nil {
+		return "", fmt.Errorf("Unable to obtain IP address of container: missing nsenter.")
+	}
+	container, err := dm.client.InspectContainer(containerID)
+	if err != nil {
+		return "", err
+	}
+
+	if !container.State.Running {
+		return "", fmt.Errorf("container not running (%s)", container.ID)
+	}
+
+	containerPid := container.State.Pid
+	extractIPCmd := fmt.Sprintf("ip -4 addr show %s | grep inet | awk -F\" \" '{print $2}'", interfaceName)
+	args := []string{"-t", fmt.Sprintf("%d", containerPid), "-n", "--", "bash", "-c", extractIPCmd}
+	command := exec.Command("nsenter", args...)
+	out, err := command.CombinedOutput()
+
+	// Fall back to IPv6 address if no IPv4 address is present
+	if err == nil && string(out) == "" {
+		extractIPCmd = fmt.Sprintf("ip -6 addr show %s scope global | grep inet6 | awk -F\" \" '{print $2}'", interfaceName)
+		args = []string{"-t", fmt.Sprintf("%d", containerPid), "-n", "--", "bash", "-c", extractIPCmd}
+		command = exec.Command("nsenter", args...)
+		out, err = command.CombinedOutput()
+	}
+
+	if err != nil {
+		return "", err
+	}
+	return string(out), nil
 }
 
 // TODO(random-liu): Change running pod to pod status in the future. We can't do it now, because kubelet also uses this function without pod status.
@@ -1552,7 +1578,7 @@ func (dm *DockerManager) runContainerInPod(pod *api.Pod, container *api.Containe
 
 func (dm *DockerManager) applyOOMScoreAdjIfNeeded(pod *api.Pod, container *api.Container, containerInfo *dockertypes.ContainerJSON) error {
 	// Compare current API version with expected api version.
-	result, err := dm.checkDockerAPIVersion(dockerV110APIVersion)
+	result, err := dm.checkDockerAPIVersion(dockerv110APIVersion)
 	if err != nil {
 		return fmt.Errorf("Failed to check docker api version: %v", err)
 	}
@@ -1952,7 +1978,7 @@ func (dm *DockerManager) SyncPod(pod *api.Pod, _ api.PodStatus, podStatus *kubec
 		podInfraContainerID, err, msg = dm.createPodInfraContainer(pod)
 		if err != nil {
 			startContainerResult.Fail(err, msg)
-			glog.Errorf("Failed to create pod infra container: %v; Skipping pod %q: %s", err, format.Pod(pod), msg)
+			glog.Errorf("Failed to create pod infra container: %v; Skipping pod %q", err, format.Pod(pod))
 			return
 		}
 
@@ -2327,19 +2353,9 @@ func (dm *DockerManager) GetNetNS(containerID kubecontainer.ContainerID) (string
 	return netnsPath, nil
 }
 
-func (dm *DockerManager) GetPodContainerID(pod *kubecontainer.Pod) (kubecontainer.ContainerID, error) {
-	for _, c := range pod.Containers {
-		if c.Name == PodInfraContainerName {
-			return c.ID, nil
-		}
-	}
-
-	return kubecontainer.ContainerID{}, fmt.Errorf("Pod %s unknown to docker.", kubecontainer.BuildPodFullName(pod.Name, pod.Namespace))
-}
-
 // Garbage collection of dead containers
-func (dm *DockerManager) GarbageCollect(gcPolicy kubecontainer.ContainerGCPolicy, allSourcesReady bool) error {
-	return dm.containerGC.GarbageCollect(gcPolicy, allSourcesReady)
+func (dm *DockerManager) GarbageCollect(gcPolicy kubecontainer.ContainerGCPolicy) error {
+	return dm.containerGC.GarbageCollect(gcPolicy)
 }
 
 func (dm *DockerManager) GetPodStatus(uid kubetypes.UID, name, namespace string) (*kubecontainer.PodStatus, error) {

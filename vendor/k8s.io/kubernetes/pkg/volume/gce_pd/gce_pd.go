@@ -58,26 +58,13 @@ func (plugin *gcePersistentDiskPlugin) Init(host volume.VolumeHost) error {
 	return nil
 }
 
-func (plugin *gcePersistentDiskPlugin) GetPluginName() string {
+func (plugin *gcePersistentDiskPlugin) Name() string {
 	return gcePersistentDiskPluginName
-}
-
-func (plugin *gcePersistentDiskPlugin) GetVolumeName(spec *volume.Spec) (string, error) {
-	volumeSource, _, err := getVolumeSource(spec)
-	if err != nil {
-		return "", err
-	}
-
-	return volumeSource.PDName, nil
 }
 
 func (plugin *gcePersistentDiskPlugin) CanSupport(spec *volume.Spec) bool {
 	return (spec.PersistentVolume != nil && spec.PersistentVolume.Spec.GCEPersistentDisk != nil) ||
 		(spec.Volume != nil && spec.Volume.GCEPersistentDisk != nil)
-}
-
-func (plugin *gcePersistentDiskPlugin) RequiresRemount() bool {
-	return false
 }
 
 func (plugin *gcePersistentDiskPlugin) GetAccessModes() []api.PersistentVolumeAccessMode {
@@ -92,25 +79,25 @@ func (plugin *gcePersistentDiskPlugin) NewMounter(spec *volume.Spec, pod *api.Po
 	return plugin.newMounterInternal(spec, pod.UID, &GCEDiskUtil{}, plugin.host.GetMounter())
 }
 
-func getVolumeSource(
-	spec *volume.Spec) (*api.GCEPersistentDiskVolumeSource, bool, error) {
+func getVolumeSource(spec *volume.Spec) (*api.GCEPersistentDiskVolumeSource, bool) {
+	var readOnly bool
+	var volumeSource *api.GCEPersistentDiskVolumeSource
+
 	if spec.Volume != nil && spec.Volume.GCEPersistentDisk != nil {
-		return spec.Volume.GCEPersistentDisk, spec.Volume.GCEPersistentDisk.ReadOnly, nil
-	} else if spec.PersistentVolume != nil &&
-		spec.PersistentVolume.Spec.GCEPersistentDisk != nil {
-		return spec.PersistentVolume.Spec.GCEPersistentDisk, spec.ReadOnly, nil
+		volumeSource = spec.Volume.GCEPersistentDisk
+		readOnly = volumeSource.ReadOnly
+	} else {
+		volumeSource = spec.PersistentVolume.Spec.GCEPersistentDisk
+		readOnly = spec.ReadOnly
 	}
 
-	return nil, false, fmt.Errorf("Spec does not reference a GCE volume type")
+	return volumeSource, readOnly
 }
 
 func (plugin *gcePersistentDiskPlugin) newMounterInternal(spec *volume.Spec, podUID types.UID, manager pdManager, mounter mount.Interface) (volume.Mounter, error) {
 	// GCEPDs used directly in a pod have a ReadOnly flag set by the pod author.
 	// GCEPDs used as a PersistentVolume gets the ReadOnly flag indirectly through the persistent-claim volume used to mount the PV
-	volumeSource, readOnly, err := getVolumeSource(spec)
-	if err != nil {
-		return nil, err
-	}
+	volumeSource, readOnly := getVolumeSource(spec)
 
 	pdName := volumeSource.PDName
 	partition := ""
@@ -232,7 +219,7 @@ func (b *gcePersistentDiskMounter) SetUp(fsGroup *int64) error {
 func (b *gcePersistentDiskMounter) SetUpAt(dir string, fsGroup *int64) error {
 	// TODO: handle failed mounts here.
 	notMnt, err := b.mounter.IsLikelyNotMountPoint(dir)
-	glog.V(4).Infof("PersistentDisk set up: %s %v %v, pd name %v readOnly %v", dir, !notMnt, err, b.pdName, b.readOnly)
+	glog.V(4).Infof("PersistentDisk set up: %s %v %v", dir, !notMnt, err)
 	if err != nil && !os.IsNotExist(err) {
 		return err
 	}

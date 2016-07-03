@@ -22,6 +22,7 @@ import (
 	"io"
 	"net"
 	"net/url"
+	"os"
 	"regexp"
 	"strconv"
 	"strings"
@@ -38,17 +39,17 @@ import (
 	"github.com/aws/aws-sdk-go/service/autoscaling"
 	"github.com/aws/aws-sdk-go/service/ec2"
 	"github.com/aws/aws-sdk-go/service/elb"
-	"github.com/golang/glog"
 	"gopkg.in/gcfg.v1"
 
 	"k8s.io/kubernetes/pkg/api"
-	"k8s.io/kubernetes/pkg/api/service"
-	"k8s.io/kubernetes/pkg/api/unversioned"
 	"k8s.io/kubernetes/pkg/cloudprovider"
 	aws_credentials "k8s.io/kubernetes/pkg/credentialprovider/aws"
 	"k8s.io/kubernetes/pkg/types"
+
+	"github.com/golang/glog"
+	"k8s.io/kubernetes/pkg/api/service"
+	"k8s.io/kubernetes/pkg/api/unversioned"
 	"k8s.io/kubernetes/pkg/util/sets"
-	"k8s.io/kubernetes/pkg/volume"
 )
 
 const ProviderName = "aws"
@@ -198,7 +199,6 @@ type EC2Metadata interface {
 type VolumeOptions struct {
 	CapacityGB int
 	Tags       map[string]string
-	PVCName    string
 }
 
 // Volumes is an interface for managing cloud-provisioned volumes
@@ -262,9 +262,7 @@ type AWSCloud struct {
 	// Note that we cache some state in awsInstance (mountpoints), so we must preserve the instance
 	selfAWSInstance *awsInstance
 
-	mutex                    sync.Mutex
-	lastNodeNames            sets.String
-	lastInstancesByNodeNames []*ec2.Instance
+	mutex sync.Mutex
 }
 
 var _ Volumes = &AWSCloud{}
@@ -915,49 +913,6 @@ func (aws *AWSCloud) List(filter string) ([]string, error) {
 	return aws.getInstancesByRegex(filter)
 }
 
-// getAllZones retrieves  a list of all the zones in which nodes are running
-// It currently involves querying all instances
-func (c *AWSCloud) getAllZones() (sets.String, error) {
-	// We don't currently cache this; it is currently used only in volume
-	// creation which is expected to be a comparatively rare occurence.
-
-	// TODO: Caching / expose api.Nodes to the cloud provider?
-	// TODO: We could also query for subnets, I think
-
-	filters := []*ec2.Filter{newEc2Filter("instance-state-name", "running")}
-	filters = c.addFilters(filters)
-	request := &ec2.DescribeInstancesInput{
-		Filters: filters,
-	}
-
-	instances, err := c.ec2.DescribeInstances(request)
-	if err != nil {
-		return nil, err
-	}
-	if len(instances) == 0 {
-		return nil, fmt.Errorf("no instances returned")
-	}
-
-	zones := sets.NewString()
-
-	for _, instance := range instances {
-		// Only return fully-ready instances when listing instances
-		// (vs a query by name, where we will return it if we find it)
-		if orEmpty(instance.State.Name) == "pending" {
-			glog.V(2).Infof("Skipping EC2 instance (pending): %s", *instance.InstanceId)
-			continue
-		}
-
-		if instance.Placement != nil {
-			zone := aws.StringValue(instance.Placement.AvailabilityZone)
-			zones.Insert(zone)
-		}
-	}
-
-	glog.V(2).Infof("Found instances in zones %s", zones)
-	return zones, nil
-}
-
 // GetZone implements Zones.GetZone
 func (c *AWSCloud) GetZone() (cloudprovider.Zone, error) {
 	return cloudprovider.Zone{
@@ -1340,9 +1295,12 @@ func (c *AWSCloud) AttachDisk(diskName string, instanceName string, readOnly boo
 
 	// Inside the instance, the mountpoint always looks like /dev/xvdX (?)
 	hostDevice := "/dev/xvd" + string(mountDevice)
-	// We are using xvd names (so we are HVM only)
-	// See http://docs.aws.amazon.com/AWSEC2/latest/UserGuide/device_naming.html
+	// In the EC2 API, it is sometimes is /dev/sdX and sometimes /dev/xvdX
+	// We are running on the node here, so we check if /dev/xvda exists to determine this
 	ec2Device := "/dev/xvd" + string(mountDevice)
+	if _, err := os.Stat("/dev/xvda"); os.IsNotExist(err) {
+		ec2Device = "/dev/sd" + string(mountDevice)
+	}
 
 	// attachEnded is set to true if the attach operation completed
 	// (successfully or not)
@@ -1428,14 +1386,11 @@ func (aws *AWSCloud) DetachDisk(diskName string, instanceName string) (string, e
 	return hostDevicePath, err
 }
 
-// CreateDisk implements Volumes.CreateDisk
+// Implements Volumes.CreateVolume
 func (s *AWSCloud) CreateDisk(volumeOptions *VolumeOptions) (string, error) {
-	allZones, err := s.getAllZones()
-	if err != nil {
-		return "", fmt.Errorf("error querying for all zones: %v", err)
-	}
-
-	createAZ := volume.ChooseZoneForVolume(allZones, volumeOptions.PVCName)
+	// Default to creating in the current zone
+	// TODO: Spread across zones?
+	createAZ := s.selfAWSInstance.availabilityZone
 
 	// TODO: Should we tag this with the cluster id (so it gets deleted when the cluster does?)
 	request := &ec2.CreateVolumeInput{}
@@ -1531,9 +1486,6 @@ func (c *AWSCloud) GetDiskPath(volumeName string) (string, error) {
 // Implement Volumes.DiskIsAttached
 func (c *AWSCloud) DiskIsAttached(diskName, instanceID string) (bool, error) {
 	awsInstance, err := c.getAwsInstance(instanceID)
-	if err != nil {
-		return false, err
-	}
 
 	info, err := awsInstance.describeInstance()
 	if err != nil {
@@ -2285,8 +2237,7 @@ func (s *AWSCloud) EnsureLoadBalancer(apiService *api.Service, hosts []string) (
 		return nil, fmt.Errorf("LoadBalancerIP cannot be specified for AWS ELB")
 	}
 
-	hostSet := sets.NewString(hosts...)
-	instances, err := s.getInstancesByNodeNamesCached(hostSet)
+	instances, err := s.getInstancesByNodeNames(hosts)
 	if err != nil {
 		return nil, err
 	}
@@ -2364,19 +2315,6 @@ func (s *AWSCloud) EnsureLoadBalancer(apiService *api.Service, hosts []string) (
 
 			permissions.Insert(permission)
 		}
-
-		// Allow ICMP fragmentation packets, important for MTU discovery
-		{
-			permission := &ec2.IpPermission{
-				IpProtocol: aws.String("icmp"),
-				FromPort:   aws.Int64(3),
-				ToPort:     aws.Int64(4),
-				IpRanges:   []*ec2.IpRange{{CidrIp: aws.String("0.0.0.0/0")}},
-			}
-
-			permissions.Insert(permission)
-		}
-
 		_, err = s.setSecurityGroupIngress(securityGroupID, permissions)
 		if err != nil {
 			return nil, err
@@ -2737,8 +2675,7 @@ func (s *AWSCloud) EnsureLoadBalancerDeleted(service *api.Service) error {
 
 // UpdateLoadBalancer implements LoadBalancer.UpdateLoadBalancer
 func (s *AWSCloud) UpdateLoadBalancer(service *api.Service, hosts []string) error {
-	hostSet := sets.NewString(hosts...)
-	instances, err := s.getInstancesByNodeNamesCached(hostSet)
+	instances, err := s.getInstancesByNodeNames(hosts)
 	if err != nil {
 		return err
 	}
@@ -2810,21 +2747,10 @@ func (a *AWSCloud) getInstancesByIDs(instanceIDs []*string) (map[string]*ec2.Ins
 	return instancesByID, nil
 }
 
-// Fetches and caches instances by node names; returns an error if any cannot be found.
+// Fetches instances by node names; returns an error if any cannot be found.
 // This is implemented with a multi value filter on the node names, fetching the desired instances with a single query.
-// TODO(therc): make all the caching more rational during the 1.4 timeframe
-func (a *AWSCloud) getInstancesByNodeNamesCached(nodeNames sets.String) ([]*ec2.Instance, error) {
-	a.mutex.Lock()
-	defer a.mutex.Unlock()
-	if nodeNames.Equal(a.lastNodeNames) {
-		if len(a.lastInstancesByNodeNames) > 0 {
-			// We assume that if the list of nodes is the same, the underlying
-			// instances have not changed. Later we might guard this with TTLs.
-			glog.V(2).Infof("Returning cached instances for %v", nodeNames)
-			return a.lastInstancesByNodeNames, nil
-		}
-	}
-	names := aws.StringSlice(nodeNames.List())
+func (a *AWSCloud) getInstancesByNodeNames(nodeNames []string) ([]*ec2.Instance, error) {
+	names := aws.StringSlice(nodeNames)
 
 	nodeNameFilter := &ec2.Filter{
 		Name:   aws.String("private-dns-name"),
@@ -2852,9 +2778,6 @@ func (a *AWSCloud) getInstancesByNodeNamesCached(nodeNames sets.String) ([]*ec2.
 		return nil, nil
 	}
 
-	glog.V(2).Infof("Caching instances for %v", nodeNames)
-	a.lastNodeNames = nodeNames
-	a.lastInstancesByNodeNames = instances
 	return instances, nil
 }
 

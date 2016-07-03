@@ -58,25 +58,12 @@ func (plugin *secretPlugin) Init(host volume.VolumeHost) error {
 	return nil
 }
 
-func (plugin *secretPlugin) GetPluginName() string {
+func (plugin *secretPlugin) Name() string {
 	return secretPluginName
-}
-
-func (plugin *secretPlugin) GetVolumeName(spec *volume.Spec) (string, error) {
-	volumeSource, _ := getVolumeSource(spec)
-	if volumeSource == nil {
-		return "", fmt.Errorf("Spec does not reference a Secret volume type")
-	}
-
-	return volumeSource.SecretName, nil
 }
 
 func (plugin *secretPlugin) CanSupport(spec *volume.Spec) bool {
 	return spec.Volume != nil && spec.Volume.Secret != nil
-}
-
-func (plugin *secretPlugin) RequiresRemount() bool {
-	return true
 }
 
 func (plugin *secretPlugin) NewMounter(spec *volume.Spec, pod *api.Pod, opts volume.VolumeOptions) (volume.Mounter, error) {
@@ -254,16 +241,4 @@ func (c *secretVolumeUnmounter) TearDownAt(dir string) error {
 		return err
 	}
 	return wrapped.TearDownAt(dir)
-}
-
-func getVolumeSource(spec *volume.Spec) (*api.SecretVolumeSource, bool) {
-	var readOnly bool
-	var volumeSource *api.SecretVolumeSource
-
-	if spec.Volume != nil && spec.Volume.Secret != nil {
-		volumeSource = spec.Volume.Secret
-		readOnly = spec.ReadOnly
-	}
-
-	return volumeSource, readOnly
 }

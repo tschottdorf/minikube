@@ -52,3 +52,7 @@ func addKnownTypes(scheme *runtime.Scheme) {
 		&api.ListOptions{},
 	)
 }
+
+func (obj *Scale) GetObjectKind() unversioned.ObjectKind                       { return &obj.TypeMeta }
+func (obj *HorizontalPodAutoscaler) GetObjectKind() unversioned.ObjectKind     { return &obj.TypeMeta }
+func (obj *HorizontalPodAutoscalerList) GetObjectKind() unversioned.ObjectKind { return &obj.TypeMeta }

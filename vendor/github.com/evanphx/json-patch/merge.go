@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"reflect"
-	"strings"
 )
 
 func merge(cur, patch *lazyNode) *lazyNode {
@@ -28,7 +27,6 @@ func merge(cur, patch *lazyNode) *lazyNode {
 
 func mergeDocs(doc, patch *partialDoc) {
 	for k, v := range *patch {
-		k := decodePatchKey(k)
 		if v == nil {
 			delete(*doc, k)
 		} else {
@@ -71,7 +69,7 @@ func pruneDocNulls(doc *partialDoc) *partialDoc {
 }
 
 func pruneAryNulls(ary *partialArray) *partialArray {
-	newAry := []*lazyNode{}
+	var newAry []*lazyNode
 
 	for _, v := range *ary {
 		if v != nil {
@@ -220,9 +218,6 @@ func matchesValue(av, bv interface{}) bool {
 			}
 		}
 		return true
-	case []interface{}:
-		bt := bv.([]interface{})
-		return matchesArray(at, bt)
 	}
 	return false
 }
@@ -231,16 +226,15 @@ func matchesValue(av, bv interface{}) bool {
 func getDiff(a, b map[string]interface{}) (map[string]interface{}, error) {
 	into := map[string]interface{}{}
 	for key, bv := range b {
-		escapedKey := encodePatchKey(key)
 		av, ok := a[key]
 		// value was added
 		if !ok {
-			into[escapedKey] = bv
+			into[key] = bv
 			continue
 		}
 		// If types have changed, replace completely
 		if reflect.TypeOf(av) != reflect.TypeOf(bv) {
-			into[escapedKey] = bv
+			into[key] = bv
 			continue
 		}
 		// Types are the same, compare values
@@ -253,23 +247,23 @@ func getDiff(a, b map[string]interface{}) (map[string]interface{}, error) {
 				return nil, err
 			}
 			if len(dst) > 0 {
-				into[escapedKey] = dst
+				into[key] = dst
 			}
 		case string, float64, bool:
 			if !matchesValue(av, bv) {
-				into[escapedKey] = bv
+				into[key] = bv
 			}
 		case []interface{}:
 			bt := bv.([]interface{})
 			if !matchesArray(at, bt) {
-				into[escapedKey] = bv
+				into[key] = bv
 			}
 		case nil:
 			switch bv.(type) {
 			case nil:
 				// Both nil, fine.
 			default:
-				into[escapedKey] = bv
+				into[key] = bv
 			}
 		default:
 			panic(fmt.Sprintf("Unknown type:%T in key %s", av, key))
@@ -283,24 +277,4 @@ func getDiff(a, b map[string]interface{}) (map[string]interface{}, error) {
 		}
 	}
 	return into, nil
-}
-
-// From http://tools.ietf.org/html/rfc6901#section-4 :
-//
-// Evaluation of each reference token begins by decoding any escaped
-// character sequence.  This is performed by first transforming any
-// occurrence of the sequence '~1' to '/', and then transforming any
-// occurrence of the sequence '~0' to '~'.
-
-var (
-	rfc6901Encoder = strings.NewReplacer("~", "~0", "/", "~1")
-	rfc6901Decoder = strings.NewReplacer("~1", "/", "~0", "~")
-)
-
-func decodePatchKey(k string) string {
-	return rfc6901Decoder.Replace(k)
-}
-
-func encodePatchKey(k string) string {
-	return rfc6901Encoder.Replace(k)
 }

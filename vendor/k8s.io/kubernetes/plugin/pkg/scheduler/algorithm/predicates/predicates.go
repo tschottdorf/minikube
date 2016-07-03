@@ -18,9 +18,6 @@ package predicates
 
 import (
 	"fmt"
-	"math/rand"
-	"strconv"
-	"time"
 
 	"github.com/golang/glog"
 	"k8s.io/kubernetes/pkg/api"
@@ -28,7 +25,6 @@ import (
 	"k8s.io/kubernetes/pkg/client/cache"
 	qosutil "k8s.io/kubernetes/pkg/kubelet/qos/util"
 	"k8s.io/kubernetes/pkg/labels"
-	utilruntime "k8s.io/kubernetes/pkg/util/runtime"
 	"k8s.io/kubernetes/plugin/pkg/scheduler/algorithm"
 	priorityutil "k8s.io/kubernetes/plugin/pkg/scheduler/algorithm/priorities/util"
 	"k8s.io/kubernetes/plugin/pkg/scheduler/schedulercache"
@@ -59,7 +55,7 @@ func (c *CachedNodeInfo) GetNodeInfo(id string) (*api.Node, error) {
 	}
 
 	if !exists {
-		return nil, fmt.Errorf("node '%v' not found", id)
+		return nil, fmt.Errorf("node '%v' is not in cache", id)
 	}
 
 	return node.(*api.Node), nil
@@ -160,13 +156,7 @@ func (c *MaxPDVolumeCountChecker) filterVolumes(volumes []api.Volume, namespace 
 			}
 			pvc, err := c.pvcInfo.GetPersistentVolumeClaimInfo(namespace, pvcName)
 			if err != nil {
-				// if the PVC is not found, log the error and count the PV towards the PV limit
-				// generate a random volume ID since its required for de-dup
-				utilruntime.HandleError(fmt.Errorf("Unable to look up PVC info for %s/%s, assuming PVC matches predicate when counting limits: %v", namespace, pvcName, err))
-				source := rand.NewSource(time.Now().UnixNano())
-				generatedID := "missingPVC" + strconv.Itoa(rand.New(source).Intn(1000000))
-				filteredVolumes[generatedID] = true
-				return nil
+				return err
 			}
 
 			pvName := pvc.Spec.VolumeName
@@ -176,14 +166,7 @@ func (c *MaxPDVolumeCountChecker) filterVolumes(volumes []api.Volume, namespace 
 
 			pv, err := c.pvInfo.GetPersistentVolumeInfo(pvName)
 			if err != nil {
-				// if the PV is not found, log the error
-				// and count the PV towards the PV limit
-				// generate a random volume ID since its required for de-dup
-				utilruntime.HandleError(fmt.Errorf("Unable to look up PV info for %s/%s/%s, assuming PV matches predicate when counting limits: %v", namespace, pvcName, pvName, err))
-				source := rand.NewSource(time.Now().UnixNano())
-				generatedID := "missingPV" + strconv.Itoa(rand.New(source).Intn(1000000))
-				filteredVolumes[generatedID] = true
-				return nil
+				return err
 			}
 
 			if id, ok := c.filter.FilterPersistentVolume(pv); ok {
